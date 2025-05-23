@@ -79,6 +79,9 @@ class HlsStreamService
             if (str_contains($videoCodec, '_qsv')) {
                 // Ensure a trailing space if hwaccel args are added
                 $hwaccelArgsString = '-hwaccel qsv -qsv_device /dev/dri/renderD128 ';
+            } elseif (str_contains($videoCodec, '_vaapi')) {
+                // Ensure a trailing space if hwaccel args are added
+                $hwaccelArgsString = '-hwaccel vaapi -vaapi_device /dev/dri/renderD128 -hwaccel_output_format vaapi ';
             }
 
             // Get user defined options

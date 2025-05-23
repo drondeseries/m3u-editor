@@ -168,4 +168,60 @@ class HlsStreamServiceTest extends TestCase
         $this->assertStringNotContainsString('-qsv_device /dev/dri/renderD128', $loggedCommand);
         $this->assertStringContainsString('-c:v libx264', $loggedCommand);
     }
+
+    public function testStartStreamWithVaapiCodec()
+    {
+        $this->mockExternalDependencies();
+
+        // Mock GeneralSettings
+        $settingsMock = Mockery::mock(GeneralSettings::class);
+        $settingsMock->shouldReceive('getAttribute')->with('ffmpeg_debug')->andReturn(false);
+        $settingsMock->shouldReceive('getAttribute')->with('ffmpeg_max_tries')->andReturn(3);
+        $settingsMock->shouldReceive('getAttribute')->with('ffmpeg_user_agent')->andReturn('TestAgent/1.0');
+        $settingsMock->shouldReceive('getAttribute')->with('ffmpeg_codec_video')->andReturn('h264_vaapi'); // VAAPI codec
+        $settingsMock->shouldReceive('getAttribute')->with('ffmpeg_codec_audio')->andReturn('aac');
+        $settingsMock->shouldReceive('getAttribute')->with('ffmpeg_codec_subtitles')->andReturn('copy');
+        $settingsMock->shouldReceive('getAttribute')->with('ffmpeg_path')->andReturn('ffmpeg');
+        $this->app->instance(GeneralSettings::class, $settingsMock);
+
+        // Mock Config facade for proxy settings
+        Config::shouldReceive('get')->with('proxy.ffmpeg_path')->andReturn(null);
+        Config::shouldReceive('get')->with('proxy.ffmpeg_codec_video')->andReturn(null);
+        Config::shouldReceive('get')->with('proxy.ffmpeg_codec_audio')->andReturn(null);
+        Config::shouldReceive('get')->with('proxy.ffmpeg_codec_subtitles')->andReturn(null);
+        Config::shouldReceive('get')->with('proxy.ffmpeg_additional_args', '')->andReturn('');
+
+        // Capture the command string logged
+        $loggedCommand = null;
+        Log::shouldReceive('channel->info')
+            ->once()
+            ->withArgs(function ($message, $context) use (&$loggedCommand) {
+                if (str_starts_with($message, 'Streaming channel')) {
+                    $parts = explode('with command: ', $message);
+                    if (count($parts) > 1) {
+                        $loggedCommand = $parts[1];
+                    }
+                    return true;
+                }
+                return false;
+            });
+        
+        Log::shouldReceive('channel->error')->zeroOrMoreTimes();
+
+        $service = new HlsStreamService();
+        try {
+            $service->startStream('test_id_vaapi', 'http://test.stream.vaapi', 'Test Channel VAAPI');
+        } catch (\Throwable $e) {
+            if (is_null($loggedCommand)) {
+                throw $e;
+            }
+        }
+
+        $this->assertNotNull($loggedCommand, "FFmpeg command was not logged for VAAPI test.");
+        $this->assertStringContainsString('-hwaccel vaapi', $loggedCommand);
+        $this->assertStringContainsString('-vaapi_device /dev/dri/renderD128', $loggedCommand);
+        $this->assertStringContainsString('-hwaccel_output_format vaapi', $loggedCommand);
+        $this->assertStringContainsString('-c:v h264_vaapi', $loggedCommand);
+        $this->assertStringNotContainsString('-hwaccel qsv', $loggedCommand);
+    }
 }
