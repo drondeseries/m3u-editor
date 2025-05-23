@@ -4,6 +4,7 @@ use App\Http\Controllers\EpgFileController;
 use App\Http\Controllers\EpgGenerateController;
 use App\Http\Controllers\PlaylistGenerateController;
 use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\Api\StreamStatsController; // Added import
 
 /*
  * Playlist/EPG output routes
@@ -90,3 +91,6 @@ Route::group(['prefix' => 'epg'], function () {
     Route::get('{uuid}/sync', [\App\Http\Controllers\EpgController::class, 'refreshEpg'])
         ->name('api.epg.sync');
 });
+
+// Basic Stream Stats Display View
+Route::get('/custom-stream-stats-display', [StreamStatsController::class, 'showBasicStatsView'])->name('stream.stats.basic_view');

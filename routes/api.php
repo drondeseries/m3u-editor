@@ -22,3 +22,7 @@ Route::group(['prefix' => 'stream'], function () {
         ->where('segment', 'segment_[0-9]{3}\.ts')
         ->name('stream.hls.segment');
 });
+
+// Active Stream Statistics
+Route::get('/stream-stats', [App\Http\Controllers\Api\StreamStatsController::class, 'getActiveStreams'])
+    ->name('api.stream.stats');

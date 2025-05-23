@@ -96,22 +96,25 @@ class ChannelStreamController extends Controller
         $streamId = Str::random(8);
         $channelId = $channel->id;
         $contentType = $format === 'ts' ? 'video/MP2T' : 'video/mp4';
+        $app_stream_id = "direct_{$channelId}_{$format}_{$streamId}"; // Unique ID for stream stats
 
         // Set the content type based on the format
-        return new StreamedResponse(function () use ($channelId, $streamUrls, $title, $settings, $format, $ip, $streamId, $userAgent) {
-            // Set unique client key (order is used for stats output)
+        return new StreamedResponse(function () use ($channelId, $streamUrls, $title, $settings, $format, $ip, $streamId, $userAgent, $app_stream_id, $request) {
+            // Set unique client key (order is used for stats output) - This is the old key, might be deprecated later
             $clientKey = "{$ip}::{$channelId}::{$streamId}";
 
             // Make sure PHP doesn't ignore user aborts
             ignore_user_abort(false);
 
             // Register a shutdown function that ALWAYS runs when the script dies
-            register_shutdown_function(function () use ($clientKey, $title) {
-                Redis::srem('mpts:active_ids', $clientKey);
-                Log::channel('ffmpeg')->info("Streaming stopped for channel {$title}");
+            register_shutdown_function(function () use ($clientKey, $title, $app_stream_id) {
+                Redis::srem('mpts:active_ids', $clientKey); // Old active ID set
+                Redis::del("stream_stats:details:{$app_stream_id}");
+                Redis::srem("stream_stats:active_ids", $app_stream_id);
+                Log::channel('ffmpeg')->info("Streaming stopped for channel {$title} (AppStreamID: {$app_stream_id})");
             });
 
-            // Mark as active
+            // Mark as active (old system)
             Redis::sadd('mpts:active_ids', $clientKey);
 
             // Clear any existing output buffers
@@ -144,6 +147,36 @@ class ChannelStreamController extends Controller
             $audioCodec = config('proxy.ffmpeg_codec_audio') ?: $settings['ffmpeg_codec_audio'];
             $subtitleCodec = config('proxy.ffmpeg_codec_subtitles') ?: $settings['ffmpeg_codec_subtitles'];
 
+            // Determine HW Accel Method
+            $hw_accel_method_used = "None";
+            if (str_contains($videoCodec, '_vaapi')) {
+                $hw_accel_method_used = "VAAPI";
+            } elseif (str_contains($videoCodec, '_qsv')) {
+                $hw_accel_method_used = "QSV";
+            }
+
+            // Initial Stream Statistics Data
+            $rawUserAgent = $request->header('User-Agent') ?? 'Unknown';
+            $streamData = [
+                'stream_id' => $app_stream_id,
+                'channel_id' => $channelId,
+                'channel_title' => $title,
+                'client_ip' => $ip,
+                'user_agent_raw' => $rawUserAgent,
+                'stream_type' => "DIRECT_STREAM",
+                'stream_format_requested' => $format,
+                'video_codec_selected' => $videoCodec,
+                'audio_codec_selected' => $audioCodec,
+                'hw_accel_method_used' => $hw_accel_method_used,
+                'ffmpeg_pid' => 'N/A', // PID not available at this stage or omitted
+                'start_time_unix' => time(),
+                'source_stream_url' => 'pending', // Will be updated in the loop
+                'ffmpeg_command' => 'pending',    // Will be updated in the loop
+            ];
+            Redis::hmset("stream_stats:details:{$app_stream_id}", $streamData);
+            Redis::sadd("stream_stats:active_ids", $app_stream_id);
+            Redis::expire("stream_stats:details:{$app_stream_id}", 3600); // 1 hour expiry
+
             // Set the output format and codecs
             $output = $format === 'ts'
                 ? "-c:v $videoCodec -c:a $audioCodec -c:s $subtitleCodec -f mpegts pipe:1"
@@ -151,6 +184,9 @@ class ChannelStreamController extends Controller
 
             // Loop through available streams...
             foreach ($streamUrls as $streamUrl) {
+                // Update source_stream_url for the current attempt
+                Redis::hset("stream_stats:details:{$app_stream_id}", "source_stream_url", $streamUrl);
+
                 // Initialize hardware acceleration arguments string
                 $hwaccelArgsString = ''; // Initialize default
                 if (str_contains($videoCodec, '_qsv')) {
@@ -189,8 +225,11 @@ class ChannelStreamController extends Controller
                     $settings['ffmpeg_debug'] ? '' : '-hide_banner -nostats -loglevel error'
                 );
 
+                // Update ffmpeg_command in Redis
+                Redis::hset("stream_stats:details:{$app_stream_id}", "ffmpeg_command", $cmd);
+
                 // Log the command for debugging
-                Log::channel('ffmpeg')->info("Streaming channel {$title} with command: {$cmd}");
+                Log::channel('ffmpeg')->info("Streaming channel {$title} with command: {$cmd} (AppStreamID: {$app_stream_id})");
 
                 // Continue trying until the client disconnects, or max retries are reached
                 $retries = 0;
@@ -199,8 +238,17 @@ class ChannelStreamController extends Controller
                     $process = SymphonyProcess::fromShellCommandline($cmd);
                     $process->setTimeout(null);
                     try {
-                        $process->run(function ($type, $buffer) use ($channelId, $format) {
+                        // Consider updating PID here if process starts successfully
+                        // $process->start(); // if using start() instead of run()
+                        // $pid = $process->getPid();
+                        // if ($pid) {
+                        //    Redis::hset("stream_stats:details:{$app_stream_id}", "ffmpeg_pid", $pid);
+                        // }
+                        $process->run(function ($type, $buffer) use ($channelId, $format, $app_stream_id) { // Pass $app_stream_id
                             if (connection_aborted()) {
+                                // Explicit cleanup if connection aborts during streaming
+                                Redis::del("stream_stats:details:{$app_stream_id}");
+                                Redis::srem("stream_stats:active_ids", $app_stream_id);
                                 throw new \Exception("Connection aborted by client.");
                             }
                             if ($type === SymphonyProcess::OUT) {
@@ -212,29 +260,6 @@ class ChannelStreamController extends Controller
                                 // split out each line
                                 $lines = preg_split('/\r?\n/', trim($buffer));
                                 foreach ($lines as $line) {
-                                    // Use below, along with `-progress pipe:2`, to enable stream progress tracking...
-                                    /*
-                                        // "progress" lines are always KEY=VALUE
-                                        if (strpos($line, '=') !== false) {
-                                            list($key, $value) = explode('=', $line, 2);
-                                            if (in_array($key, ['bitrate', 'fps', 'out_time_ms'])) {
-                                                // push the metric value onto a Redis list and trim to last 20 points
-                                                $listKey = "mpts:hist:{$channelId}:{$key}";
-                                                $timeKey = "mpts:hist:{$channelId}:timestamps";
-
-                                                // push the timestamp into a parallel list (once per loop)
-                                                Redis::rpush($timeKey, now()->format('H:i:s'));
-                                                Redis::ltrim($timeKey, -20, -1);
-
-                                                // push the metric value
-                                                Redis::rpush($listKey, $value);
-                                                Redis::ltrim($listKey, -20, -1);
-                                            }
-                                        } elseif ($line !== '') {
-                                            // anything else is a true ffmpeg log/error
-                                            Log::channel('ffmpeg')->error($line);
-                                        }
-                                    */
                                     Log::channel('ffmpeg')->error($line);
                                 }
                             }
@@ -243,7 +268,11 @@ class ChannelStreamController extends Controller
                         // Log eror and attempt to reconnect.
                         if (!connection_aborted()) {
                             Log::channel('ffmpeg')
-                                ->error("Error streaming channel (\"$title\"): " . $e->getMessage());
+                                ->error("Error streaming channel (\"$title\"): " . $e->getMessage() . " (AppStreamID: {$app_stream_id})");
+                        } else {
+                            // If connection aborted led to this exception, ensure cleanup
+                            Redis::del("stream_stats:details:{$app_stream_id}");
+                            Redis::srem("stream_stats:active_ids", $app_stream_id);
                         }
                     }
 
@@ -252,21 +281,24 @@ class ChannelStreamController extends Controller
                         if ($process->isRunning()) {
                             $process->stop(1); // SIGTERM then SIGKILL
                         }
+                        // Cleanup already handled by shutdown function or exception block
                         return;
                     }
                     if (++$retries >= $maxRetries) {
                         // Log error and stop trying this stream...
                         Log::channel('ffmpeg')
-                            ->error("FFmpeg error: max retries of $maxRetries reached for stream for channel $title.");
-
-                        // ...break and try the next stream
-                        break;
+                            ->error("FFmpeg error: max retries of $maxRetries reached for stream for channel $title. (AppStreamID: {$app_stream_id})");
+                        
+                        // No need to explicitly clean up here, shutdown function will handle it if stream truly ends.
+                        // If we break, the outer "Error: No available streams" might be reached.
+                        break; 
                     }
                     // Wait a short period before trying to reconnect.
                     sleep(min(8, $retries));
                 }
             }
-
+            // If loop finishes (e.g. max retries for all sources), the stream effectively failed.
+            // The shutdown function will handle cleanup of the Redis stats.
             echo "Error: No available streams.";
         }, 200, [
             'Content-Type' => $contentType,

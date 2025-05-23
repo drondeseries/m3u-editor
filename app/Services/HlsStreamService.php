@@ -178,14 +178,45 @@ class HlsStreamService
 
             // Cache the actual FFmpeg PID
             $status = proc_get_status($process);
-            $pid = $status['pid'];
+            $pid = $status['pid']; // This is the actual FFmpeg PID
             Cache::forever("hls:pid:{$id}", $pid);
 
-            // Record timestamp in Redis (never expires until we prune)
+            // Record timestamp in Redis (never expires until we prune) - Old system
             Redis::set("hls:last_seen:{$id}", now()->timestamp);
 
-            // Add to active IDs set
+            // Add to active IDs set - Old system
             Redis::sadd('hls:active_ids', $id);
+
+            // New Stream Statistics Logging
+            $app_stream_id = "hls_{$id}_{$pid}";
+
+            $hw_accel_method_used = "None";
+            if (str_contains($videoCodec, '_vaapi')) {
+                $hw_accel_method_used = "VAAPI";
+            } elseif (str_contains($videoCodec, '_qsv')) {
+                $hw_accel_method_used = "QSV";
+            }
+
+            $streamData = [
+                'stream_id' => $app_stream_id,
+                'channel_id' => $id,
+                'channel_title' => $title,
+                'client_ip' => "N/A", // Not available at this service level for HLS
+                'user_agent_raw' => "N/A", // $userAgent is FFmpeg's, not the client's
+                'stream_type' => "HLS_STREAM",
+                'stream_format_requested' => "hls",
+                'video_codec_selected' => $videoCodec,
+                'audio_codec_selected' => $audioCodec,
+                'hw_accel_method_used' => $hw_accel_method_used,
+                'ffmpeg_pid' => $pid,
+                'start_time_unix' => time(),
+                'source_stream_url' => $streamUrl,
+                'ffmpeg_command' => $cmd,
+            ];
+            Redis::hmset("stream_stats:details:{$app_stream_id}", $streamData);
+            Redis::sadd("stream_stats:active_ids", $app_stream_id);
+            Redis::expire("stream_stats:details:{$app_stream_id}", 10800); // 3 hours expiry
+
         }
         return $pid;
     }
@@ -199,9 +230,17 @@ class HlsStreamService
     public function stopStream($id): bool
     {
         $cacheKey = "hls:pid:{$id}";
-        $pid = Cache::get($cacheKey);
+        $pid = Cache::get($cacheKey); // Get PID from cache first
         $wasRunning = false;
-        if ($this->isRunning($id)) {
+
+        // Attempt to clean up Redis stats if PID was cached, regardless of current running state
+        if ($pid) {
+            $app_stream_id = "hls_{$id}_{$pid}";
+            Redis::del("stream_stats:details:{$app_stream_id}");
+            Redis::srem("stream_stats:active_ids", $app_stream_id);
+        }
+
+        if ($this->isRunning($id)) { // isRunning uses its own Cache::get call, but $pid here is from our earlier call
             $wasRunning = true;
             // Attempt to gracefully stop the FFmpeg process
             posix_kill($pid, SIGTERM);
@@ -210,17 +249,30 @@ class HlsStreamService
                 // If the process is still running after SIGTERM, force kill it
                 posix_kill($pid, SIGKILL);
             }
-            Cache::forget($cacheKey);
+            Cache::forget($cacheKey); // Forget the PID from cache
 
             // Cleanup on-disk HLS files
             $storageDir = Storage::disk('app')->path("hls/{$id}");
             File::deleteDirectory($storageDir);
         } else {
-            Log::channel('ffmpeg')->warning("No running FFmpeg process for channel {$id} to stop.");
+            // If not running, but we had a PID, we've already attempted cleanup.
+            // If PID was not in cache, $pid would be null, and no specific app_stream_id cleanup for stats occurs.
+            // Log warning if we intended to stop a specific process but it wasn't found running.
+            if (Cache::has($cacheKey) && !$pid) { 
+                 // This case should ideally not be hit if isRunning uses the same Cache::get logic
+                 Log::channel('ffmpeg')->warning("FFmpeg process for channel {$id} was cached but PID not retrieved for stats cleanup, or process already gone.");
+            } else if (!$pid) {
+                 Log::channel('ffmpeg')->warning("No cached FFmpeg PID for channel {$id} to stop or clean up stats.");
+            } else {
+                 Log::channel('ffmpeg')->warning("No running FFmpeg process for channel {$id} to stop (PID: {$pid}). Stats cleanup attempted.");
+            }
+            // Ensure cache key is forgotten if it somehow still exists but process is not running
+            Cache::forget($cacheKey);
         }
 
-        // Remove from active IDs set
+        // Remove from active IDs set (Old system)
         Redis::srem('hls:active_ids', $id);
+
 
         return $wasRunning;
     }
