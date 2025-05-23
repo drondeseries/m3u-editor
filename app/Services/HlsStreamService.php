@@ -74,6 +74,13 @@ class HlsStreamService
             $subtitleCodec = config('proxy.ffmpeg_codec_subtitles') ?: $settings['ffmpeg_codec_subtitles'];
             $outputFormat = "-c:v $videoCodec -c:a $audioCodec -bsf:a aac_adtstoasc -c:s $subtitleCodec";
 
+            // Initialize hardware acceleration arguments string
+            $hwaccelArgsString = '';
+            if (str_contains($videoCodec, '_qsv')) {
+                // Ensure a trailing space if hwaccel args are added
+                $hwaccelArgsString = '-hwaccel qsv -qsv_device /dev/dri/renderD128 ';
+            }
+
             // Get user defined options
             $userArgs = config('proxy.ffmpeg_additional_args', '');
             if (!empty($userArgs)) {
@@ -93,38 +100,35 @@ class HlsStreamService
                 $ffmpegPath . ' ' .
                     // Optimization options:
                     '-fflags nobuffer -flags low_delay ' .
-
+                    // Hardware acceleration (includes trailing space if not empty)
+                    '%s' .
                     // Pre-input HTTP options:
                     '-user_agent "%s" -referer "MyComputer" ' .
                     '-multiple_requests 1 -reconnect_on_network_error 1 ' .
                     '-reconnect_on_http_error 5xx,4xx -reconnect_streamed 1 ' .
                     '-reconnect_delay_max 5 -noautorotate ' .
-
                     // User defined options:
                     '%s' .
-
                     // I/O options:
                     '-re -i "%s" ' .
-
                     // Output options:
                     '-preset veryfast -g 15 -keyint_min 15 -sc_threshold 0 ' .
                     '%s ' . // output format
-
                     // HLS options:
                     '-f hls -hls_time 2 -hls_list_size 6 ' .
                     '-hls_flags delete_segments+append_list+independent_segments ' .
                     '-use_wallclock_as_timestamps 1 ' .
                     '-hls_segment_filename %s ' .
                     '-hls_base_url %s %s ' .
-
                     // Logging:
                     '%s',
+                $hwaccelArgsString,           // QSV hardware acceleration arguments (or empty string)
                 $userAgent,                   // for -user_agent
                 $userArgs,                    // user defined options
                 $streamUrl,                   // input URL
                 $outputFormat,                // output format
                 $segment,                     // segment filename
-                $segmentBaseUrl,              // base URL for segments (want to make sure routed through the proxy to track active users)
+                $segmentBaseUrl,              // base URL for segments
                 $m3uPlaylist,                 // playlist filename
                 $settings['ffmpeg_debug'] ? '' : '-hide_banner -nostats -loglevel error'
             );
