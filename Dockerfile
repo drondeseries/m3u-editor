@@ -27,6 +27,11 @@ RUN apk update && apk --no-cache add \
     git \
     bash \
     tzdata \
+    # Intel GPU drivers for VAAPI/QSV
+    intel-media-driver \
+    libva \
+    libva-intel-driver \
+    libva-utils \
     # nginx + php-fpm
     nginx \
     php84-cli \
