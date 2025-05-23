@@ -151,9 +151,17 @@ class ChannelStreamController extends Controller
 
             // Loop through available streams...
             foreach ($streamUrls as $streamUrl) {
+                // Initialize hardware acceleration arguments string
+                $hwaccelArgsString = ''; // Initialize default
+                if (str_contains($videoCodec, '_qsv')) {
+                    $hwaccelArgsString = '-hwaccel qsv -qsv_device /dev/dri/renderD128 '; // QSV specific args
+                } elseif (str_contains($videoCodec, '_vaapi')) {
+                    $hwaccelArgsString = '-hwaccel vaapi -vaapi_device /dev/dri/renderD128 -hwaccel_output_format vaapi '; // VAAPI specific args
+                }
+
                 // Build the FFmpeg command
                 $cmd = sprintf(
-                    $ffmpegPath . ' ' .
+                    $ffmpegPath . ' ' . $hwaccelArgsString . // Hardware acceleration arguments prepended
                         // Pre-input HTTP options:
                         '-user_agent "%s" -referer "MyComputer" ' .
                         '-multiple_requests 1 -reconnect_on_network_error 1 ' .
