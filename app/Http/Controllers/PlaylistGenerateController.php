@@ -71,7 +71,7 @@ class PlaylistGenerateController extends Controller
                 echo "#EXTM3U\n";
                 $channelNumber = $playlist->auto_channel_increment ? $playlist->channel_start - 1 : 0;
                 $idChannelBy = $playlist->id_channel_by;
-                
+
                 // Process regular channels
                 foreach ($channels as $channel) {
                     // Get the title and name
@@ -157,15 +157,15 @@ class PlaylistGenerateController extends Controller
                 foreach ($mergedChannels as $mergedChannel) {
                     $mergedChannelTitle = $mergedChannel->name;
                     // Use a distinct prefix for merged channel tvg-id to avoid conflicts
-                    $mergedChannelTvgId = "mergedchannel_" . $mergedChannel->id; 
-                    $mergedChannelName = $mergedChannel->name; 
+                    $mergedChannelTvgId = "mergedchannel_" . $mergedChannel->id;
+                    $mergedChannelName = $mergedChannel->name;
                     // Merged channels might not have a direct EPG mapping yet, use placeholder or name
                     $mergedChannelIcon = url('/placeholder.png'); // Placeholder icon
                     // Group title for merged channels, can be customized
-                    $mergedChannelGroup = "Merged Channels"; 
+                    $mergedChannelGroup = "Merged Channels";
                     // Merged channels don't have traditional channel numbers from M3U, timeshift, or catchup in the same way
                     // For now, we'll omit tvg-chno, timeshift. Catchup could be added if MergedChannel model supports it.
-                    
+
                     $mergedUrl = route('mergedChannel.stream', ['mergedChannelId' => $mergedChannel->id, 'format' => 'ts']);
 
                     $extInf = "#EXTINF:-1 tvg-id=\"{$mergedChannelTvgId}\" tvg-name=\"{$mergedChannelName}\" tvg-logo=\"{$mergedChannelIcon}\" group-title=\"{$mergedChannelGroup}\"";
@@ -328,10 +328,10 @@ class PlaylistGenerateController extends Controller
         $mergedChannelsData = [];
         if ($playlistType === 'custom' && method_exists($playlist, 'mergedChannels')) {
             // MergedChannel model does not have an 'enabled' status, so fetch all.
-            $mergedChannels = $playlist->mergedChannels()->get(); 
+            $mergedChannels = $playlist->mergedChannels()->get();
             foreach ($mergedChannels as $mergedChannel) {
                 $mergedChannelsData[] = [
-                    'GuideNumber' => 'merged_' . $mergedChannel->id, // Ensure uniqueness
+                    'GuideNumber' => $mergedChannel->name, // Changed as per requirement
                     'GuideName'   => $mergedChannel->name,
                     'URL'         => route('mergedChannel.stream', ['mergedChannelId' => $mergedChannel->id, 'format' => 'ts'])
                 ];
