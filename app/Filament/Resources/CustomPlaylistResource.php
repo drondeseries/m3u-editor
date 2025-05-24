@@ -4,6 +4,7 @@ namespace App\Filament\Resources;
 
 use App\Filament\Resources\CustomPlaylistResource\Pages;
 use App\Filament\Resources\CustomPlaylistResource\RelationManagers;
+use App\Filament\Resources\MergedChannelResource; // Added for the new action button
 use App\Forms\Components\PlaylistEpgUrl;
 use App\Forms\Components\PlaylistM3uUrl;
 use App\Forms\Components\MediaFlowProxyUrl;
@@ -370,6 +371,23 @@ class CustomPlaylistResource extends Resource
                                                             Placeholder::make('source_count')
                                                                 ->label('Source Channels')
                                                                 ->content(fn (?MergedChannel $record): string => $record ? $record->sourceChannels()->count() . ' sources' : 'N/A'),
+                                                            // The new action component:
+                                                            Forms\Components\Actions\Action::make('view_item_action')
+                                                                ->label('View Details')
+                                                                ->icon('heroicon-m-eye')
+                                                                ->url(function (?MergedChannel $record): ?string { // $record is the MergedChannel model instance for the current repeater item
+                                                                    if (!$record || !$record->exists) {
+                                                                        return null;
+                                                                    }
+                                                                    // Ensure MergedChannelResource is correctly referenced or imported if not already.
+                                                                    // Assuming MergedChannelResource::class will correctly resolve.
+                                                                    return MergedChannelResource::getUrl('edit', ['record' => $record->id]);
+                                                                })
+                                                                ->openUrlInNewTab(true)
+                                                                ->button()
+                                                                ->color('secondary')
+                                                                ->size('xs') // Using 'xs' for a smaller button, suitable for repeater items
+                                                                ->columnSpanFull() // This will make the button take the full width of the grid (i.e., both columns)
                                                         ])
                                                 ])
                                                 ->itemLabel(fn (array $state): ?string => 
@@ -380,17 +398,6 @@ class CustomPlaylistResource extends Resource
                                                 ->addable(false) // Disable creating new MergedChannels from here
                                                 ->deletable(true)  // Enables detach for BelongsToMany items
                                                 ->columnSpanFull()
-                                                ->itemActions([
-                                                    Forms\Components\Actions\Action::make('view_merged_channel_item') // Renamed action for clarity
-                                                        ->label('View')
-                                                        ->icon('heroicon-m-eye')
-                                                        ->url(function (CustomPlaylist $playlistRecord, Forms\Components\Repeater $component, string $item): ?string {
-                                                            // $item is the key of the repeater item, which is the ID of the MergedChannel for BelongsToMany
-                                                            $mergedChannel = MergedChannel::find($item); // Fetch the MergedChannel model directly
-                                                            return $mergedChannel ? MergedChannelResource::getUrl('edit', ['record' => $mergedChannel]) : null;
-                                                        })
-                                                        ->openUrlInNewTab(),
-                                                ])
                                                 ->headerActions([
                                                     Forms\Components\Actions\Action::make('attach_merged_channels_action') // Renamed action for clarity
                                                         ->label('Attach Merged Channels')
