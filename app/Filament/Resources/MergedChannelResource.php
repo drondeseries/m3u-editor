@@ -18,6 +18,7 @@ use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\SoftDeletingScope;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Log; // Added
 
 class MergedChannelResource extends Resource
 {
@@ -103,7 +104,7 @@ class MergedChannelResource extends Resource
                             ->label('MPEG-TS Stream URL')
                             ->content(function (?MergedChannel $record): string {
                                 if ($record && $record->id) {
-                                    return route('merged-stream', ['mergedChannelId' => $record->id, 'format' => 'ts']);
+                                    return route('mergedChannel.stream', ['mergedChannelId' => $record->id, 'format' => 'ts']); // Corrected route name
                                 }
                                 return 'URL will be available after saving.';
                             }),
@@ -111,7 +112,7 @@ class MergedChannelResource extends Resource
                             ->label('MP4 Stream URL')
                             ->content(function (?MergedChannel $record): string {
                                 if ($record && $record->id) {
-                                    return route('merged-stream', ['mergedChannelId' => $record->id, 'format' => 'mp4']);
+                                    return route('mergedChannel.stream', ['mergedChannelId' => $record->id, 'format' => 'mp4']); // Corrected route name
                                 }
                                 return 'URL will be available after saving.';
                             }),
@@ -119,7 +120,7 @@ class MergedChannelResource extends Resource
                             ->label('FLV Stream URL')
                             ->content(function (?MergedChannel $record): string {
                                 if ($record && $record->id) {
-                                    return route('merged-stream', ['mergedChannelId' => $record->id, 'format' => 'flv']);
+                                    return route('mergedChannel.stream', ['mergedChannelId' => $record->id, 'format' => 'flv']); // Corrected route name
                                 }
                                 return 'URL will be available after saving.';
                             }),
@@ -175,7 +176,20 @@ class MergedChannelResource extends Resource
 
     public static function mutateFormDataBeforeCreate(array $data): array
     {
-        $data['user_id'] = Auth::id();
+        Log::info('MergedChannelResource: mutateFormDataBeforeCreate started.', ['incoming_data' => $data]);
+        
+        $authId = Auth::id();
+        Log::info('MergedChannelResource: Auth::id() value.', ['auth_id' => $authId]);
+
+        if (is_null($authId)) {
+            Log::error('MergedChannelResource: Auth::id() is NULL in mutateFormDataBeforeCreate! This is unexpected.');
+            // Potentially throw an exception or handle error, as user_id will be null.
+            // For now, logging is key. The defensive step in handleRecordCreation will catch it.
+        }
+        
+        $data['user_id'] = $authId;
+        Log::info('MergedChannelResource: Data after adding user_id.', ['data_with_user_id' => $data]);
+        
         return $data;
     }
 }
