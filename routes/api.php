@@ -26,3 +26,7 @@ Route::group(['prefix' => 'stream'], function () {
 // Active Stream Statistics
 Route::get('/stream-stats', [App\Http\Controllers\Api\StreamStatsController::class, 'getActiveStreams'])
     ->name('api.stream.stats');
+
+// FFmpeg Stream Progress Reporting
+Route::post('/stream-progress/{streamId}', [App\Http\Controllers\Api\StreamProgressController::class, 'handleProgress'])
+    ->name('api.stream.progress');

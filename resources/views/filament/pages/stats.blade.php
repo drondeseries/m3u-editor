@@ -15,6 +15,12 @@
                 </p>
                 <p><em>(Channel ID: {{ $stream['channel_id'] }})</em></p> {{-- Optional: for debugging or future use --}}
             </div>
+
+            <div class="mt-4 border-t pt-4 dark:border-gray-700"> {{-- Added a div for better separation --}}
+                <h4 class="mb-2 text-md font-semibold text-gray-700 dark:text-gray-300">Live Statistics:</h4>
+                <livewire:stream-stats-chart :streamId="$stream['channel_id']" :key="'chart-' . $stream['channel_id']" />
+            </div>
+
             <div class="mt-4">
                 <x-filament::button wire:click="loadAndShowFfprobeStats({{ $stream['channel_id'] }})">
                     View Stream Details

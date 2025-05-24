@@ -211,7 +211,7 @@ class ChannelStreamController extends Controller
                         '-re -i "%s" ' .
 
                         // Progress tracking:
-                        // '-progress pipe:2 ' . // Disabled for now
+                        '-progress %s ' .         // Added for progress reporting
 
                         // Output:
                         '%s ' .
@@ -221,8 +221,9 @@ class ChannelStreamController extends Controller
                     $userAgent,                   // for -user_agent
                     $userArgs,                    // user defined options
                     $streamUrl,                   // input URL
+                    url('/api/stream-progress/' . $app_stream_id), // URL for -progress
                     $output,                      // for -f
-                    $settings['ffmpeg_debug'] ? '' : '-hide_banner -nostats -loglevel error'
+                    $settings['ffmpeg_debug'] ? '' : '-hide_banner -loglevel error' // Removed -nostats
                 );
 
                 // Update ffmpeg_command in Redis
@@ -244,11 +245,14 @@ class ChannelStreamController extends Controller
                         // if ($pid) {
                         //    Redis::hset("stream_stats:details:{$app_stream_id}", "ffmpeg_pid", $pid);
                         // }
-                        $process->run(function ($type, $buffer) use ($channelId, $format, $app_stream_id) { // Pass $app_stream_id
+                        $process->run(function ($type, $buffer) use ($channelId, $format, $app_stream_id, $process) { // Pass $app_stream_id and $process
                             if (connection_aborted()) {
                                 // Explicit cleanup if connection aborts during streaming
                                 Redis::del("stream_stats:details:{$app_stream_id}");
                                 Redis::srem("stream_stats:active_ids", $app_stream_id);
+                                if ($process->isRunning()) {
+                                    $process->stop(0, SIGKILL); // Force kill if connection aborted
+                                }
                                 throw new \Exception("Connection aborted by client.");
                             }
                             if ($type === SymphonyProcess::OUT) {
@@ -256,11 +260,17 @@ class ChannelStreamController extends Controller
                                 flush();
                                 usleep(10000); // Reduce CPU usage
                             }
+                            // Note: FFmpeg progress reports might also go to ERR if not exclusively to the -progress URL.
+                            // Depending on FFmpeg version and configuration, stderr might still get some messages.
+                            // The current logging of ERR is kept.
                             if ($type === SymphonyProcess::ERR) {
                                 // split out each line
                                 $lines = preg_split('/\r?\n/', trim($buffer));
                                 foreach ($lines as $line) {
-                                    Log::channel('ffmpeg')->error($line);
+                                    // Avoid logging empty lines or lines that are just progress heartbeats if they also appear on stderr
+                                    if (!empty($line) && !str_starts_with($line, 'progress=')) {
+                                        Log::channel('ffmpeg')->error($line . " (AppStreamID: {$app_stream_id})");
+                                    }
                                 }
                             }
                         });
@@ -273,6 +283,9 @@ class ChannelStreamController extends Controller
                             // If connection aborted led to this exception, ensure cleanup
                             Redis::del("stream_stats:details:{$app_stream_id}");
                             Redis::srem("stream_stats:active_ids", $app_stream_id);
+                             if ($process && $process->isRunning()) { // Ensure process is stopped if exception due to abort
+                                $process->stop(0, SIGKILL);
+                            }
                         }
                     }
 
