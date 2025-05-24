@@ -67,4 +67,12 @@ class CustomPlaylist extends Model
     {
         return $this->morphToMany(PostProcess::class, 'processable');
     }
+
+    /**
+     * The merged channels that belong to the custom playlist.
+     */
+    public function mergedChannels(): BelongsToMany
+    {
+        return $this->belongsToMany(MergedChannel::class, 'custom_playlist_merged_channel', 'custom_playlist_id', 'merged_channel_id');
+    }
 }

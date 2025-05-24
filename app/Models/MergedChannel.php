@@ -15,6 +15,7 @@ class MergedChannel extends Model
     protected $fillable = [
         'name',
         'user_id',
+        'epg_channel_id', // Added epg_channel_id
     ];
 
     /**
@@ -43,5 +44,13 @@ class MergedChannel extends Model
         return $this->belongsToMany(Channel::class, 'merged_channel_sources', 'merged_channel_id', 'source_channel_id')
                     ->withPivot('priority')
                     ->orderBy('merged_channel_sources.priority', 'asc');
+    }
+
+    /**
+     * Get the EPG channel associated with this merged channel.
+     */
+    public function epgChannel(): BelongsTo
+    {
+        return $this->belongsTo(EpgChannel::class);
     }
 }

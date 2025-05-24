@@ -11,8 +11,9 @@ return new class extends Migration
      */
     public function up(): void
     {
-        Schema::connection('jobs')->dropIfExists('jobs');
-        Schema::connection('jobs')->create('jobs', function (Blueprint $table) {
+        // Use default connection to avoid issues if 'jobs' connection is not fully set up
+        Schema::dropIfExists('jobs');
+        Schema::create('jobs', function (Blueprint $table) {
             $table->id();
             $table->string('title');
             $table->string('batch_no');
@@ -27,6 +28,7 @@ return new class extends Migration
      */
     public function down(): void
     {
-        Schema::connection('jobs')->dropIfExists('jobs');
+        // Use default connection
+        Schema::dropIfExists('jobs');
     }
 };

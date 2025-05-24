@@ -161,6 +161,13 @@ class CustomPlaylistResource extends Resource
                 ->helperText('User agent string to use for making requests.')
                 ->default('Mozilla/5.0 (Windows; U; Windows NT 5.1; en-US; rv:1.8.1.13) Gecko/20080311 Firefox/2.0.0.13')
                 ->required(),
+            Forms\Components\Select::make('mergedChannels')
+                ->relationship('mergedChannels', 'name')
+                ->multiple()
+                ->preload()
+                ->searchable()
+                ->helperText('Select merged channels to include in this playlist.')
+                ->columnSpanFull(), // Ensure it takes full width if in a grid
         ];
         if (PlaylistUrlFacade::mediaFlowProxyEnabled()) {
             $schema[] = Forms\Components\Section::make('MediaFlow Proxy')
@@ -291,7 +298,16 @@ class CustomPlaylistResource extends Resource
                         ->tabs([
                             Forms\Components\Tabs\Tab::make('General')
                                 ->columns(2)
-                                ->schema($schema),
+                                ->schema([
+                                    ...$schema, // Spread the existing general schema fields
+                                    Forms\Components\Select::make('mergedChannels') // Add it here for the edit tab
+                                        ->relationship('mergedChannels', 'name')
+                                        ->multiple()
+                                        ->preload()
+                                        ->searchable()
+                                        ->helperText('Select merged channels to include in this playlist.')
+                                        ->columnSpanFull(),
+                                ]),
                             Forms\Components\Tabs\Tab::make('Output')
                                 ->columns(2)
                                 ->schema($outputScheme),

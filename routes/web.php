@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\EpgFileController;
 use App\Http\Controllers\EpgGenerateController;
+use App\Http\Controllers\MergedChannelStreamController;
 use App\Http\Controllers\PlaylistGenerateController;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\StreamStatsController; // Added import
@@ -63,6 +64,10 @@ Route::get('/phpinfo', function () {
 // Stream an IPTV channel (MPEGTS/MP4)
 Route::get('/stream/{encodedId}.{format?}', \App\Http\Controllers\ChannelStreamController::class)
     ->name('stream');
+
+// Stream a merged IPTV channel (MPEGTS/MP4)
+Route::get('/stream/merged/{mergedChannelId}/{format?}', MergedChannelStreamController::class)
+    ->name('mergedChannel.stream');
 
 
 /*

@@ -111,13 +111,19 @@ class EpgGenerateController extends Controller
             ->orderBy('title')
             ->cursor();
 
+        // Fetch Merged Channels if the playlist is a CustomPlaylist
+        $mergedChannelsForEpg = [];
+        if ($playlist instanceof CustomPlaylist && method_exists($playlist, 'mergedChannels')) {
+            $mergedChannelsForEpg = $playlist->mergedChannels()->with('epgChannel')->get();
+        }
+
         // Get playlist settings
         $channelNumber = $playlist->auto_channel_increment ? $playlist->channel_start - 1 : 0;
         $idChannelBy = $playlist->id_channel_by;
         $dummyEpgEnabled = $playlist->dummy_epg;
         $dummyEpgLength = (int)$playlist->dummy_epg_length ?? 120; // Default to 120 minutes if not set
 
-        // Generate `<channel>` tags for each channel
+        // Generate `<channel>` tags for each regular channel
         foreach ($channels as $channel) {
             // Get/set the channel number
             $channelNo = $channel->channel;
@@ -193,7 +199,7 @@ class EpgGenerateController extends Controller
                 // Need this to output the <programme> tags later
                 $dummyEpgChannels[] = [
                     'tvg_id' => $tvgId,
-                    'channel_id' => $channel->id,
+                    'channel_id' => $channel->id, // Keep original channel ID for context if needed
                     'channel_no' => $channelNo,
                     'title' => $title,
                     'icon' => $icon,
@@ -209,6 +215,49 @@ class EpgGenerateController extends Controller
                 }
                 if ($icon) {
                     echo PHP_EOL . '    <icon src="' . $icon . '"/>';
+                }
+                echo PHP_EOL . '  </channel>' . PHP_EOL;
+            }
+        }
+
+        // Generate `<channel>` tags for each MergedChannel
+        foreach ($mergedChannelsForEpg as $mergedChannel) {
+            $tvgId = "mergedchannel_" . $mergedChannel->id; // Consistent with M3U
+            $title = htmlspecialchars($mergedChannel->name);
+            $epgData = $mergedChannel->epgChannel ?? null; // Eager loaded
+
+            if ($epgData) {
+                if (!array_key_exists($epgData->epg_id, $epgChannels)) {
+                    $epgChannels[$epgData->epg_id] = [];
+                }
+                // Map the original EPG's channel_id to the merged channel's new tvgId
+                $epgChannels[$epgData->epg_id][] = [$epgData->channel_id => $tvgId];
+                
+                $icon = $epgData->icon ?? url('/placeholder.png');
+
+                echo '  <channel id="' . $tvgId . '">' . PHP_EOL;
+                echo '    <display-name lang="' . $epgData->lang . '">' . $title . '</display-name>';
+                // Merged channels don't have a traditional channel number from playlist settings
+                // echo '    <display-name>Merged</display-name>'; // Optional: add a marker
+                if ($icon) {
+                    echo PHP_EOL . '    <icon src="' . htmlspecialchars($icon) . '"/>';
+                }
+                echo PHP_EOL . '  </channel>' . PHP_EOL;
+            } elseif ($dummyEpgEnabled) {
+                $icon = url('/placeholder.png'); // Default icon for dummy EPG merged channel
+                $dummyEpgChannels[] = [
+                    'tvg_id' => $tvgId,
+                    'channel_id' => 'merged_' . $mergedChannel->id, // Unique identifier for dummy context
+                    'channel_no' => null, // Merged channels don't have numbers in this context
+                    'title' => $title,
+                    'icon' => $icon,
+                    'group' => "Merged Channels", // Generic group for dummy EPG
+                    'include_category' => $playlist->dummy_epg_category,
+                ];
+                echo '  <channel id="' . $tvgId . '">' . PHP_EOL;
+                echo '    <display-name>' . $title . '</display-name>';
+                if ($icon) {
+                    echo PHP_EOL . '    <icon src="' . htmlspecialchars($icon) . '"/>';
                 }
                 echo PHP_EOL . '  </channel>' . PHP_EOL;
             }
