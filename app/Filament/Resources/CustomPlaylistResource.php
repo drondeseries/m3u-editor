@@ -169,12 +169,31 @@ class CustomPlaylistResource extends Resource
         $schema = [
             Forms\Components\TextInput::make('name')
                 ->required()
-                ->helperText('Enter the name of the playlist. Internal use only.'),
+                ->helperText('Enter the name of the playlist. Internal use only.')
+                ->unique(CustomPlaylist::class, 'name', ignoreRecord: true, modifyRuleUsing: function ($rule, Get $get) {
+                    // Scope the uniqueness check to the current user.
+                    // And ignore the current record if we are in an edit context.
+                    $userId = Auth::id();
+                    $query = CustomPlaylist::where('user_id', $userId);
+
+                    // If we are in an edit form, the record ID will be available.
+                    // $recordId = $get('id'); // This might not be reliable or always present for uniqueness checks on 'name'
+                                          // It's better to rely on ignoreRecord: true for the current record.
+                                          // However, Filament's built-in unique rule with ignoreRecord: true handles this.
+                                          // We just need to ensure it's scoped to the user.
+
+                    return $rule->where(function ($query) use ($userId) {
+                        $query->where('user_id', $userId);
+                    });
+                })
+                ->validationMessages([
+                    'unique' => 'A playlist with this name already exists for your account.',
+                ]),
             Forms\Components\TextInput::make('user_agent')
                 ->helperText('User agent string to use for making requests.')
                 ->default('Mozilla/5.0 (Windows; U; Windows NT 5.1; en-US; rv:1.8.1.13) Gecko/20080311 Firefox/2.0.0.13')
                 ->required(),
-            self::getMergedChannelsFormField(), // Replaced here
+            self::getMergedChannelsFormField(), // Added back here
         ];
         if (PlaylistUrlFacade::mediaFlowProxyEnabled()) {
             $schema[] = Forms\Components\Section::make('MediaFlow Proxy')
@@ -306,8 +325,8 @@ class CustomPlaylistResource extends Resource
                             Forms\Components\Tabs\Tab::make('General')
                                 ->columns(2)
                                 ->schema([
-                                    ...$schema, // Spread the existing general schema fields
-                                    self::getMergedChannelsFormField(), // Replaced here
+                                    ...$schema, // Spread the existing general schema fields (which now includes MergedChannels)
+                                    // self::getMergedChannelsFormField(), // Removed from here as it's now part of $schema
                                 ]),
                             Forms\Components\Tabs\Tab::make('Output')
                                 ->columns(2)

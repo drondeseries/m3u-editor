@@ -281,7 +281,16 @@ class PlaylistGenerateController extends Controller
         $idChannelBy = $playlist->id_channel_by;
         $autoIncrement = $playlist->auto_channel_increment;
         $channelNumber = $autoIncrement ? $playlist->channel_start - 1 : 0;
-        return response()->json($channels->transform(function (Channel $channel) use ($proxyEnabled, $idChannelBy, $autoIncrement, &$channelNumber) {
+
+        // Determine playlist type
+        $playlistType = 'standard'; // Default
+        if ($playlist instanceof \App\Models\MergedPlaylist) {
+            $playlistType = 'merged';
+        } elseif ($playlist instanceof \App\Models\CustomPlaylist) {
+            $playlistType = 'custom';
+        }
+
+        $directChannelsData = $channels->transform(function (Channel $channel) use ($proxyEnabled, $idChannelBy, $autoIncrement, &$channelNumber) {
             $url = $channel->url_custom ?? $channel->url;
             if ($proxyEnabled) {
                 $url = ProxyFacade::getProxyUrlForChannel(
@@ -313,20 +322,24 @@ class PlaylistGenerateController extends Controller
                 'GuideName' => $channel->title_custom ?? $channel->title,
                 'URL' => $url,
             ];
+        })->values()->all(); // Get as a plain array
 
-            // Example of more detailed response
-            //            return [
-            //                'GuideNumber' => $channel->channel_number ?? $streamId, // Channel number (e.g., "100")
-            //                'GuideName'   => $channel->title_custom ?? $channel->title, // Channel name
-            //                'URL'         => $url, // Stream URL
-            //                'HD'          => $is_hd ? 1 : 0, // HD flag
-            //                'VideoCodec'  => 'H264', // Set based on your stream format
-            //                'AudioCodec'  => 'AAC', // Set based on your stream format
-            //                'Favorite'    => $favorite ? 1 : 0, // Favorite flag
-            //                'DRM'         => 0, // Assuming no DRM
-            //                'Streaming'   => 'direct', // Direct stream or transcoding
-            //            ];
-        }));
+        // Fetch and process Merged Channels if the playlist is a CustomPlaylist
+        $mergedChannelsData = [];
+        if ($playlistType === 'custom' && method_exists($playlist, 'mergedChannels')) {
+            // MergedChannel model does not have an 'enabled' status, so fetch all.
+            $mergedChannels = $playlist->mergedChannels()->get(); 
+            foreach ($mergedChannels as $mergedChannel) {
+                $mergedChannelsData[] = [
+                    'GuideNumber' => 'merged_' . $mergedChannel->id, // Ensure uniqueness
+                    'GuideName'   => $mergedChannel->name,
+                    'URL'         => route('mergedChannel.stream', ['mergedChannelId' => $mergedChannel->id, 'format' => 'ts'])
+                ];
+            }
+        }
+
+        $finalLineup = array_merge($directChannelsData, $mergedChannelsData);
+        return response()->json($finalLineup);
     }
 
     public function hdhrLineupStatus(string $uuid)

@@ -29,7 +29,7 @@ class ChannelFactory extends Factory
             'channel' => $this->faker->randomNumber(),
             'shift' => $this->faker->randomNumber(),
             'url' => $this->faker->url(),
-            'logo' => $this->faker->word(),
+            'logo' => $this->faker->imageUrl(640, 480, 'cats', true, 'Faker'), // Generate a valid image URL
             'group' => $this->faker->word(),
             'stream_id' => $this->faker->word(),
             'lang' => $this->faker->word(),
@@ -37,6 +37,7 @@ class ChannelFactory extends Factory
             'user_id' => User::factory(),
             'playlist_id' => Playlist::factory(),
             'group_id' => Group::factory(),
+            'logo_type' => \App\Enums\ChannelLogoType::Channel, // Add default logo_type
         ];
     }
 }

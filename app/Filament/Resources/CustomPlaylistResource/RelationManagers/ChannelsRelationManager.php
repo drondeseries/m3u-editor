@@ -224,11 +224,93 @@ class ChannelsRelationManager extends RelationManager
                 Tables\Actions\ActionGroup::make([
                     Tables\Actions\EditAction::make()
                         ->slideOver()
-                        ->form(fn(Tables\Actions\EditAction $action): array => [
-                            Forms\Components\Grid::make()
-                                ->schema(ChannelResource::getForm())
-                                ->columns(2)
-                        ]),
+                        ->form(function (Tables\Actions\EditAction $action): array {
+                            $schema = ChannelResource::getForm();
+                            // Find and modify the 'name_custom' field
+                            foreach ($schema as $key => $component) {
+                                if ($component instanceof \Filament\Forms\Components\Fieldset) {
+                                    $fieldsetSchema = $component->getChildComponents();
+                                    foreach ($fieldsetSchema as $fsKey => $field) {
+                                        if ($field instanceof \Filament\Forms\Components\TextInput && $field->getName() === 'name_custom') {
+                                            $fieldsetSchema[$fsKey] = $field->rules([
+                                                'nullable', // Keep existing behavior of allowing empty to use default
+                                                'min:1', // From ChannelResource
+                                                'max:255', // From ChannelResource
+                                                function () use ($action) {
+                                                    return function (string $attribute, $value, \Closure $fail) use ($action) {
+                                                        if (empty($value)) { // Do not validate if the custom name is empty
+                                                            return;
+                                                        }
+                                                        // Corrected way to get owner record from an action in a RelationManager
+                                                        $ownerPlaylist = $action->getLivewire()->getOwnerRecord(); 
+                                                        $channelBeingEditedId = $action->getRecord()->id;
+
+                                                        $query = $ownerPlaylist->channels()
+                                                            ->where('channels.id', '!=', $channelBeingEditedId) // Exclude the current channel
+                                                            ->where(function ($query) use ($value) {
+                                                                $query->where('channels.name_custom', $value)
+                                                                      ->orWhere(function($q) use ($value) {
+                                                                        // Also check default name if custom name is not set for others
+                                                                        $q->whereNull('channels.name_custom')
+                                                                          ->where('channels.name', $value);
+                                                                      });
+                                                            });
+                                                        
+                                                        // Check if the value matches the default 'name' of the current record if 'name_custom' is being cleared
+                                                        // This case is tricky because if $value is now '', we don't want to compare it to other empty custom_names
+                                                        // The main concern is if $value (new custom_name) conflicts with an existing name or custom_name
+
+                                                        if ($query->exists()) {
+                                                            $fail('A channel with this name (either custom or default) already exists in this playlist.');
+                                                        }
+                                                    };
+                                                }
+                                            ]);
+                                            // Replace the fieldset with the modified one
+                                            $schema[$key] = $component->schema($fieldsetSchema); 
+                                            break 2; // Break both loops
+                                        }
+                                    }
+                                } else if ($component instanceof \Filament\Forms\Components\TextInput && $component->getName() === 'name_custom') {
+                                    $schema[$key] = $component->rules([
+                                        ...$component->getRules(), // Preserve existing rules
+                                        function () use ($action) {
+                                            return function (string $attribute, $value, \Closure $fail) use ($action) {
+                                                if (empty($value)) { // Do not validate if the custom name is empty
+                                                    return;
+                                                }
+                                                // Corrected way to get owner record from an action in a RelationManager
+                                                $ownerPlaylist = $action->getLivewire()->getOwnerRecord();
+                                                $channelBeingEditedId = $action->getRecord()->id;
+
+                                                $query = $ownerPlaylist->channels()
+                                                    ->where('channels.id', '!=', $channelBeingEditedId)
+                                                    ->where(function ($query) use ($value) {
+                                                        $query->where('channels.name_custom', $value)
+                                                              ->orWhere(function($q) use ($value) {
+                                                                $q->whereNull('channels.name_custom')
+                                                                  ->where('channels.name', $value);
+                                                              });
+                                                    });
+
+                                                if ($query->exists()) {
+                                                    $fail('A channel with this name (either custom or default) already exists in this playlist.');
+                                                }
+                                            };
+                                        }
+                                    ]);
+                                    break; // Break the loop
+                                }
+                            }
+                            // Ensure the rest of the schema is correctly processed if 'name_custom' isn't found directly or in a fieldset.
+                            // However, the current structure of ChannelResource::getForm() places 'name_custom' in a fieldset.
+
+                            return [
+                                Forms\Components\Grid::make()
+                                    ->schema($schema)
+                                    ->columns(2)
+                            ];
+                        }),
                     Tables\Actions\ViewAction::make()
                         ->slideOver(),
                     Tables\Actions\DetachAction::make()

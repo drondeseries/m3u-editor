@@ -17,6 +17,31 @@ class Channel extends Model
     use HasFactory;
     use HasTags;
 
+    protected $fillable = [
+        'user_id',
+        'playlist_id',
+        'group_id',
+        'epg_channel_id',
+        'logo_type',
+        'logo',
+        'name',
+        'name_custom',
+        'title',
+        'title_custom',
+        'stream_id',
+        'stream_id_custom',
+        'url',
+        'url_custom',
+        'channel',
+        'shift',
+        'enabled',
+        'sort',
+        'catchup',
+        'catchup_source',
+        'extvlcopt',
+        'kodidrop',
+    ];
+
     /**
      * The attributes that should be cast to native types.
      *
