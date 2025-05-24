@@ -41,7 +41,7 @@ class DetailedSystemStats extends Page
         $userId = auth()->id();
 
         $this->totalPlaylists = Playlist::where('user_id', $userId)->count();
-        $lastPlaylistSyncDate = Playlist::where('user_id', $userId)->max('synced_at'); // Assuming 'synced_at' from your previous examples, adjust if different
+        $lastPlaylistSyncDate = Playlist::where('user_id', $userId)->max('synced'); 
         $this->lastPlaylistSync = $lastPlaylistSyncDate ? Carbon::parse($lastPlaylistSyncDate)->diffForHumans() : 'Never';
 
         $this->totalGroups = Group::where('user_id', $userId)->count();
@@ -50,7 +50,7 @@ class DetailedSystemStats extends Page
         $this->enabledChannels = Channel::where('user_id', $userId)->where('is_enabled', true)->count();
 
         $this->totalEpgs = Epg::where('user_id', $userId)->count();
-        $lastEpgSyncDate = Epg::where('user_id', $userId)->max('synced_at'); // Assuming 'synced_at', adjust if different
+        $lastEpgSyncDate = Epg::where('user_id', $userId)->max('synced'); 
         $this->lastEpgSync = $lastEpgSyncDate ? Carbon::parse($lastEpgSyncDate)->diffForHumans() : 'Never';
 
         $this->totalEpgChannels = EpgChannel::whereHas('epg', function ($query) use ($userId) {
