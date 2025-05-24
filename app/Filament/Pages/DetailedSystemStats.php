@@ -47,7 +47,7 @@ class DetailedSystemStats extends Page
         $this->totalGroups = Group::where('user_id', $userId)->count();
 
         $this->totalChannels = Channel::where('user_id', $userId)->count();
-        $this->enabledChannels = Channel::where('user_id', $userId)->where('is_enabled', true)->count();
+        $this->enabledChannels = Channel::where('user_id', $userId)->where('enabled', true)->count();
 
         $this->totalEpgs = Epg::where('user_id', $userId)->count();
         $lastEpgSyncDate = Epg::where('user_id', $userId)->max('synced'); 
