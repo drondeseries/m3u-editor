@@ -45,9 +45,17 @@ class EditMergedChannel extends EditRecord
             Log::info('EditMergedChannel: No record or sourceChannels relationship found/loaded for populating repeater.');
         }
 
-        // Fill the 'sourceChannels' field in the form with the prepared data.
-        $this->form->fill(['sourceChannels' => $sourceChannelsData]);
-        Log::info('EditMergedChannel: Form fill attempted for sourceChannels data.');
+        // Prepare data for form fill, including the main 'name' field
+        $formData = ['sourceChannels' => $sourceChannelsData];
+        if ($this->record && isset($this->record->name)) {
+            $formData['name'] = $this->record->name;
+        } else {
+            // Log if record or name is unexpectedly missing, though parent::fillForm should handle it
+            Log::warning('EditMergedChannel: Record or record name is missing when trying to explicitly fill name.', ['record_exists' => !!$this->record]);
+        }
+        
+        $this->form->fill($formData);
+        Log::info('EditMergedChannel: Form fill attempted for sourceChannels and name data.');
     }
 
     protected function handleRecordUpdate(Model $record, array $data): Model

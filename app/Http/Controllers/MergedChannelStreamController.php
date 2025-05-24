@@ -165,13 +165,20 @@ class MergedChannelStreamController extends Controller
                 Redis::sadd("stream_stats:active_ids", $app_stream_id); // Add specific attempt
                 Redis::expire("stream_stats:details:{$app_stream_id}", 3600); // 1 hour expiry
 
+                $videoFilter = '';
+                if (str_contains($videoCodec, 'vaapi')) {
+                    $videoFilter = '-vf format=nv12 '; // Added space at the end
+                }
+
                 $outputFormatCmd = '';
                 if ($format === 'ts') {
-                    $outputFormatCmd = "-c:v {$videoCodec} -c:a {$audioCodec} -c:s {$subtitleCodec} -f mpegts pipe:1";
+                    $outputFormatCmd = "{$videoFilter}-c:v {$videoCodec} -c:a {$audioCodec} -c:s {$subtitleCodec} -f mpegts pipe:1";
                 } elseif ($format === 'mp4') {
-                    $outputFormatCmd = "-c:v {$videoCodec} -c:a {$audioCodec} -bsf:a aac_adtstoasc -c:s {$subtitleCodec} -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof pipe:1";
+                    // Note: VAAPI might not be typically used with MP4 container in this direct way for live streams,
+                    // but apply the filter consistently if vaapi is in the codec name.
+                    $outputFormatCmd = "{$videoFilter}-c:v {$videoCodec} -c:a {$audioCodec} -bsf:a aac_adtstoasc -c:s {$subtitleCodec} -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof pipe:1";
                 } elseif ($format === 'flv') {
-                     $outputFormatCmd = "-c:v {$videoCodec} -c:a {$audioCodec} -c:s {$subtitleCodec} -f flv pipe:1";
+                    $outputFormatCmd = "{$videoFilter}-c:v {$videoCodec} -c:a {$audioCodec} -c:s {$subtitleCodec} -f flv pipe:1";
                 }
 
 

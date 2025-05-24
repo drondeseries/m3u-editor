@@ -14,6 +14,7 @@ use Filament\Forms\Form;
 use Illuminate\Support\Facades\Auth;
 use Filament\Forms\Get;
 use Filament\Forms\Components\Placeholder; // Added for new display fields
+use Filament\Forms\Components\TextInput; // Added for TextInput
 use Filament\Resources\Resource;
 use Filament\Tables;
 use Filament\Tables\Table;
@@ -341,11 +342,12 @@ class CustomPlaylistResource extends Resource
                                                             Placeholder::make('name_display') // Changed from TextInput
                                                                 ->label('Name')
                                                                 ->content(fn (?MergedChannel $record): string => $record?->name ?? 'N/A'),
-                                                            Placeholder::make('stream_url')
+                                                            Forms\Components\TextInput::make('stream_url_display') // Changed name to avoid conflict if 'stream_url' is a real attribute
                                                                 ->label('Stream URL')
-                                                                ->content(fn (?MergedChannel $record): string => $record ? route('mergedChannel.stream', ['mergedChannelId' => $record->id, 'format' => 'ts']) : 'N/A')
+                                                                ->disabled()
+                                                                ->formatStateUsing(fn (?MergedChannel $record): string => $record ? route('mergedChannel.stream', ['mergedChannelId' => $record->id, 'format' => 'ts']) : 'N/A')
                                                                 ->helperText('MPEG-TS Stream URL.')
-                                                                ->copyable(), 
+                                                                ->copyable(),
                                                             Placeholder::make('epg_source')
                                                                 ->label('EPG Source')
                                                                 ->content(fn (?MergedChannel $record): string => $record?->epgChannel?->name ?? 'N/A'),
