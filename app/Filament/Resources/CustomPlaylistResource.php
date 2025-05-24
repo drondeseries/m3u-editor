@@ -365,9 +365,16 @@ class CustomPlaylistResource extends Resource
                                                 ->schema([
                                                     Forms\Components\Grid::make(2) // Use a grid for better layout
                                                         ->schema([
-                                                            Placeholder::make('name_display') // Changed from TextInput
+                                                            Placeholder::make('name_display')
                                                                 ->label('Name')
-                                                                ->content(fn (?MergedChannel $record): string => $record?->name ?? 'N/A'),
+                                                                ->content(function (?MergedChannel $record): ?HtmlString {
+                                                                    if (!$record || !$record->exists) {
+                                                                        return new HtmlString(htmlspecialchars($record?->name ?? 'N/A'));
+                                                                    }
+                                                                    $url = MergedChannelResource::getUrl('edit', ['record' => $record->id]);
+                                                                    $name = htmlspecialchars($record->name ?? 'View Details');
+                                                                    return new HtmlString("<a href='{$url}' target='_blank' style='text-decoration: underline; color: #06c;'>{$name}</a>");
+                                                                }),
                                                             Forms\Components\TextInput::make('stream_url_display') // Changed name to avoid conflict if 'stream_url' is a real attribute
                                                                 ->label('Stream URL')
                                                                 ->disabled()
@@ -394,22 +401,6 @@ class CustomPlaylistResource extends Resource
                                                             Placeholder::make('source_count')
                                                                 ->label('Source Channels')
                                                                 ->content(fn (?MergedChannel $record): string => $record ? $record->sourceChannels()->count() . ' sources' : 'N/A'),
-                                                            // The new action component:
-                                                            Forms\Components\Actions\Action::make('view_item_action')
-                                                                ->label('View Details')
-                                                                ->icon('heroicon-m-eye')
-                                                                ->url(function (?MergedChannel $record): ?string { // $record is the MergedChannel model instance for the current repeater item
-                                                                    if (!$record || !$record->exists) {
-                                                                        return null;
-                                                                    }
-                                                                    // Ensure MergedChannelResource is correctly referenced or imported if not already.
-                                                                    // Assuming MergedChannelResource::class will correctly resolve.
-                                                                    return MergedChannelResource::getUrl('edit', ['record' => $record->id]);
-                                                                })
-                                                                ->openUrlInNewTab(true)
-                                                                ->button()
-                                                                ->color('secondary')
-                                                                ->size('xs') // Using 'xs' for a smaller button, suitable for repeater items
                                                         ])
                                                 ])
                                                 ->itemLabel(fn (array $state): ?string => 
