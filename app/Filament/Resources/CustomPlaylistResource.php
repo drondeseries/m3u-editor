@@ -387,7 +387,6 @@ class CustomPlaylistResource extends Resource
                                                                 ->button()
                                                                 ->color('secondary')
                                                                 ->size('xs') // Using 'xs' for a smaller button, suitable for repeater items
-                                                                ->columnSpanFull() // This will make the button take the full width of the grid (i.e., both columns)
                                                         ])
                                                 ])
                                                 ->itemLabel(fn (array $state): ?string => 
