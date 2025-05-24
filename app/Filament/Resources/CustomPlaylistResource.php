@@ -377,7 +377,7 @@ class CustomPlaylistResource extends Resource
                                                     $state['name'] ?? 'Merged Channel Item' 
                                                 )
                                                 ->reorderable(false)
-                                                ->addAction(false) // Disable creating new MergedChannels from here
+                                                ->addable(false) // Disable creating new MergedChannels from here
                                                 ->deletable(true)  // Enables detach for BelongsToMany items
                                                 ->columnSpanFull()
                                                 ->itemActions([
