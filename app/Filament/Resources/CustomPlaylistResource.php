@@ -363,10 +363,11 @@ class CustomPlaylistResource extends Resource
                                             Forms\Components\Repeater::make('mergedChannels') // Named after the relationship
                                                 ->relationship() 
                                                 ->schema([
-                                                    Forms\Components\Grid::make(2) // Use a grid for better layout
+                                                    Forms\Components\Grid::make(4) // Changed to 4 columns
                                                         ->schema([
                                                             Placeholder::make('name_display')
                                                                 ->label('Name')
+                                                                ->columnSpan(1) // Explicitly set column span
                                                                 ->content(function (?MergedChannel $record): ?HtmlString {
                                                                     if (!$record || !$record->exists) {
                                                                         return new HtmlString(htmlspecialchars($record?->name ?? 'N/A'));
@@ -377,6 +378,7 @@ class CustomPlaylistResource extends Resource
                                                                 }),
                                                             Forms\Components\TextInput::make('stream_url_display') // Changed name to avoid conflict if 'stream_url' is a real attribute
                                                                 ->label('Stream URL')
+                                                                ->columnSpan(1) // Explicitly set column span
                                                                 ->disabled()
                                                                 ->formatStateUsing(fn (?MergedChannel $record): string => $record ? route('mergedChannel.stream', ['mergedChannelId' => $record->id, 'format' => 'ts']) : 'N/A')
                                                                 ->helperText('MPEG-TS Stream URL.')
@@ -397,9 +399,11 @@ class CustomPlaylistResource extends Resource
                                                                 ),
                                                             Placeholder::make('epg_source')
                                                                 ->label('EPG Source')
+                                                                ->columnSpan(1) // Explicitly set column span
                                                                 ->content(fn (?MergedChannel $record): string => $record?->epgChannel?->name ?? 'N/A'),
                                                             Placeholder::make('source_count')
                                                                 ->label('Source Channels')
+                                                                ->columnSpan(1) // Explicitly set column span
                                                                 ->content(fn (?MergedChannel $record): string => $record ? $record->sourceChannels()->count() . ' sources' : 'N/A'),
                                                         ])
                                                 ])
