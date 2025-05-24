@@ -8,8 +8,10 @@ use App\Forms\Components\PlaylistEpgUrl;
 use App\Forms\Components\PlaylistM3uUrl;
 use App\Forms\Components\MediaFlowProxyUrl;
 use App\Models\CustomPlaylist;
+use App\Models\MergedChannel; // Added
 use Filament\Forms;
 use Filament\Forms\Form;
+use Illuminate\Support\Facades\Auth; // Added
 use Filament\Forms\Get;
 use Filament\Resources\Resource;
 use Filament\Tables;
@@ -43,6 +45,32 @@ class CustomPlaylistResource extends Resource
     public static function getNavigationSort(): ?int
     {
         return 2;
+    }
+
+    private static function getMergedChannelsFormField(): Forms\Components\Repeater
+    {
+        return Forms\Components\Repeater::make('mergedChannels')
+            ->relationship('mergedChannels')
+            ->label('Associated Merged Channels')
+            ->schema([
+                Forms\Components\Select::make('id') // Corresponds to MergedChannel->id
+                    ->label('Merged Channel')
+                    ->options(function () {
+                        // Scope options to the authenticated user's merged channels
+                        return \App\Models\MergedChannel::where('user_id', Auth::id())
+                                                      ->pluck('name', 'id');
+                    })
+                    ->searchable()
+                    ->preload()
+                    ->required()
+                    ->columnSpanFull(), // Make the select take the full width within the repeater item
+            ])
+            ->addActionLabel('Add Merged Channel')
+            ->collapsible()
+            ->columnSpanFull() // The Repeater itself spans full
+            ->reorderableWithButtons(); // Add reordering capability
+            // ->cloneable() // Optionally make items cloneable
+            // ->grid(1) // Optionally define how many items per row in the repeater itself, default is usually 1.
     }
 
     public static function form(Form $form): Form
@@ -161,13 +189,7 @@ class CustomPlaylistResource extends Resource
                 ->helperText('User agent string to use for making requests.')
                 ->default('Mozilla/5.0 (Windows; U; Windows NT 5.1; en-US; rv:1.8.1.13) Gecko/20080311 Firefox/2.0.0.13')
                 ->required(),
-            Forms\Components\Select::make('mergedChannels')
-                ->relationship('mergedChannels', 'name')
-                ->multiple()
-                ->preload()
-                ->searchable()
-                ->helperText('Select merged channels to include in this playlist.')
-                ->columnSpanFull(), // Ensure it takes full width if in a grid
+            self::getMergedChannelsFormField(), // Replaced here
         ];
         if (PlaylistUrlFacade::mediaFlowProxyEnabled()) {
             $schema[] = Forms\Components\Section::make('MediaFlow Proxy')
@@ -300,13 +322,7 @@ class CustomPlaylistResource extends Resource
                                 ->columns(2)
                                 ->schema([
                                     ...$schema, // Spread the existing general schema fields
-                                    Forms\Components\Select::make('mergedChannels') // Add it here for the edit tab
-                                        ->relationship('mergedChannels', 'name')
-                                        ->multiple()
-                                        ->preload()
-                                        ->searchable()
-                                        ->helperText('Select merged channels to include in this playlist.')
-                                        ->columnSpanFull(),
+                                    self::getMergedChannelsFormField(), // Replaced here
                                 ]),
                             Forms\Components\Tabs\Tab::make('Output')
                                 ->columns(2)
