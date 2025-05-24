@@ -10,7 +10,7 @@ use Filament\Forms;
 use Filament\Forms\Form;
 use Filament\Forms\Get; // Added
 use Filament\Forms\Set; // Added
-use Filament\Forms\Components\Fieldset; // Added
+// use Filament\Forms\Components\Fieldset; // Removed
 use Filament\Forms\Components\Placeholder; // Added
 use Filament\Resources\Resource;
 use Filament\Tables;
@@ -93,7 +93,7 @@ class MergedChannelResource extends Resource
                     ->collapsible()
                     ->columnSpanFull(),
                 
-                Fieldset::make('Stream URLs')
+                Forms\Components\Section::make('Stream URLs') // Changed from Fieldset
                     ->label('Generated Stream URLs')
                     ->collapsible()
                     ->visibleOn('edit') // Only visible on the edit page
