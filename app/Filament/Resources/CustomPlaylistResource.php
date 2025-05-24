@@ -15,6 +15,8 @@ use Illuminate\Support\Facades\Auth;
 use Filament\Forms\Get;
 use Filament\Forms\Components\Placeholder; // Added for new display fields
 use Filament\Forms\Components\TextInput; // Added for TextInput
+use Filament\Forms\Components\Actions\Action; // Added for suffixAction
+use Illuminate\Support\HtmlString; // Added for suffixAction
 use Filament\Resources\Resource;
 use Filament\Tables;
 use Filament\Tables\Table;
@@ -347,7 +349,21 @@ class CustomPlaylistResource extends Resource
                                                                 ->disabled()
                                                                 ->formatStateUsing(fn (?MergedChannel $record): string => $record ? route('mergedChannel.stream', ['mergedChannelId' => $record->id, 'format' => 'ts']) : 'N/A')
                                                                 ->helperText('MPEG-TS Stream URL.')
-                                                                ->copyable(),
+                                                                ->suffixAction(
+                                                                    \Filament\Forms\Components\Actions\Action::make('copyUrl')
+                                                                        ->icon('heroicon-o-clipboard-document')
+                                                                        ->label('') // Ensure no text label, just icon
+                                                                        ->tooltip('Copy Stream URL')
+                                                                        ->action(null) // No server-side action needed
+                                                                        ->extraAttributes([
+                                                                            'onclick' => new \Illuminate\Support\HtmlString(
+                                                                                "navigator.clipboard.writeText(this.closest('.fi-input-wrp').querySelector('input').value)" .
+                                                                                ".then(() => { Filament.notify('success', 'URL copied to clipboard'); })" .
+                                                                                ".catch(err => { Filament.notify('danger', 'Failed to copy URL'); console.error('Failed to copy: ', err); });"
+                                                                            ),
+                                                                            'style' => 'margin-left: -0.5rem; padding: 0.25rem;'
+                                                                        ])
+                                                                ),
                                                             Placeholder::make('epg_source')
                                                                 ->label('EPG Source')
                                                                 ->content(fn (?MergedChannel $record): string => $record?->epgChannel?->name ?? 'N/A'),
