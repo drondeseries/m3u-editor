@@ -8,6 +8,10 @@ use App\Models\EpgChannel; // Added EpgChannel
 use App\Models\MergedChannel;
 use Filament\Forms;
 use Filament\Forms\Form;
+use Filament\Forms\Get; // Added
+use Filament\Forms\Set; // Added
+use Filament\Forms\Components\Fieldset; // Added
+use Filament\Forms\Components\Placeholder; // Added
 use Filament\Resources\Resource;
 use Filament\Tables;
 use Filament\Tables\Table;
@@ -55,14 +59,31 @@ class MergedChannelResource extends Resource
                                     ->label('Channel')
                                     ->options(Channel::query()->pluck('name', 'id'))
                                     ->searchable(['name', 'id'])
-                                    ->required(),
+                                    ->required()
+                                    ->reactive() // Make it reactive
+                                    ->afterStateUpdated(function (Set $set, ?string $state) {
+                                        if ($state) {
+                                            $channel = Channel::find($state);
+                                            if ($channel) {
+                                                $set('selected_channel_url', $channel->url_custom ?? $channel->url);
+                                            } else {
+                                                $set('selected_channel_url', null); // Channel not found
+                                            }
+                                        } else {
+                                            $set('selected_channel_url', null); // State cleared
+                                        }
+                                    }),
+                                Forms\Components\TextInput::make('selected_channel_url')
+                                    ->label('Selected Channel URL')
+                                    ->disabled()
+                                    ->placeholder('Select a channel to see its URL'),
                                 Forms\Components\TextInput::make('priority')
                                     ->numeric() // Use TextInput with numeric validation
                                     ->required()
                                     ->default(0)
                                     ->helperText("Lower numbers indicate higher priority (e.g., 0 is highest). Channels will be tried in order of priority."),
                             ])
-                            ->columns(2)
+                            ->columns(3) // Changed to 3 columns
                             ->defaultItems(1)
                             ->addActionLabel('Add Source Channel')
                             ->reorderableWithButtons()
@@ -71,6 +92,38 @@ class MergedChannelResource extends Resource
                     ])
                     ->collapsible()
                     ->columnSpanFull(),
+                
+                Fieldset::make('Stream URLs')
+                    ->label('Generated Stream URLs')
+                    ->collapsible()
+                    ->visibleOn('edit') // Only visible on the edit page
+                    ->columnSpanFull()
+                    ->schema([
+                        Placeholder::make('placeholder_stream_url_ts')
+                            ->label('MPEG-TS Stream URL')
+                            ->content(function (?MergedChannel $record): string {
+                                if ($record && $record->id) {
+                                    return route('merged-stream', ['mergedChannelId' => $record->id, 'format' => 'ts']);
+                                }
+                                return 'URL will be available after saving.';
+                            }),
+                        Placeholder::make('placeholder_stream_url_mp4')
+                            ->label('MP4 Stream URL')
+                            ->content(function (?MergedChannel $record): string {
+                                if ($record && $record->id) {
+                                    return route('merged-stream', ['mergedChannelId' => $record->id, 'format' => 'mp4']);
+                                }
+                                return 'URL will be available after saving.';
+                            }),
+                        Placeholder::make('placeholder_stream_url_flv')
+                            ->label('FLV Stream URL')
+                            ->content(function (?MergedChannel $record): string {
+                                if ($record && $record->id) {
+                                    return route('merged-stream', ['mergedChannelId' => $record->id, 'format' => 'flv']);
+                                }
+                                return 'URL will be available after saving.';
+                            }),
+                    ]),
             ]);
     }
 
