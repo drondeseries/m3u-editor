@@ -25,13 +25,12 @@ class EditMergedChannel extends EditRecord
 
         $record->update($data);
 
-        $syncData = [];
-        foreach ($sourceChannelsData as $source) {
-            if (!empty($source['source_channel_id'])) {
-                $syncData[$source['source_channel_id']] = ['priority' => $source['priority'] ?? 0];
-            }
-        }
-        $record->sourceChannels()->sync($syncData);
+        // Manual sync logic for sourceChannels removed.
+        // Filament's Repeater with ->relationship('sourceChannels') will handle this.
+        // The $sourceChannelsData variable is still populated from $data['sourceChannels']
+        // before it's unset, but it's no longer used in this method.
+        // Log this change for clarity during debugging, if necessary.
+        // Log::info('EditMergedChannel: handleRecordUpdate completed, relying on Filament for relationship sync.', ['record_id' => $record->id]);
 
         return $record;
     }

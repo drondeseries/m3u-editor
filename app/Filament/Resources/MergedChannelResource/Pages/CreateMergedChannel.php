@@ -68,34 +68,12 @@ class CreateMergedChannel extends CreateRecord
             throw new \RuntimeException('Failed to create MergedChannel record, cannot proceed with syncing source channels.');
         }
 
-        $syncData = [];
-        if (!empty($sourceChannelsData)) {
-            foreach ($sourceChannelsData as $source) {
-                if (!empty($source['source_channel_id'])) {
-                    $syncData[$source['source_channel_id']] = ['priority' => $source['priority'] ?? 0];
-                }
-            }
-            Log::info('CreateMergedChannel: Data for syncing sourceChannels.', ['sync_data' => $syncData, 'merged_channel_id' => $record->id]);
-            try {
-                $record->sourceChannels()->sync($syncData);
-                Log::info('CreateMergedChannel: sourceChannels synced successfully.');
-            } catch (\Exception $e) {
-                Log::error('CreateMergedChannel: Exception during sourceChannels sync.', [
-                    'error' => $e->getMessage(),
-                    'trace' => $e->getTraceAsString(), // Verbose
-                    'merged_channel_id' => $record->id,
-                    'sync_data' => $syncData
-                ]);
-                // If sync fails, the main record might be created but relations are not.
-                // Depending on desired behavior, one might want to delete the $record here or handle it.
-                // For now, log and re-throw.
-                throw $e;
-            }
-        } else {
-            Log::info('CreateMergedChannel: No sourceChannelsData provided for sync.');
-        }
+        // Manual sync logic for sourceChannels removed.
+        // Filament's Repeater with ->relationship('sourceChannels') will handle this.
+        // The $sourceChannelsData variable is still populated from $data['sourceChannels']
+        // before it's unset, but it's no longer used in this method.
 
-        Log::info('CreateMergedChannel: handleRecordCreation completed.', ['final_record_id' => $record->id]);
+        Log::info('CreateMergedChannel: handleRecordCreation completed, relying on Filament for relationship sync.', ['final_record_id' => $record->id]);
         return $record;
     }
 

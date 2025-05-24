@@ -47,30 +47,15 @@ class CustomPlaylistResource extends Resource
         return 2;
     }
 
-    private static function getMergedChannelsFormField(): Forms\Components\Repeater
+    private static function getMergedChannelsFormField(): Forms\Components\Select
     {
-        return Forms\Components\Repeater::make('mergedChannels')
-            ->relationship('mergedChannels')
-            ->label('Associated Merged Channels')
-            ->schema([
-                Forms\Components\Select::make('id') // Corresponds to MergedChannel->id
-                    ->label('Merged Channel')
-                    ->options(function () {
-                        // Scope options to the authenticated user's merged channels
-                        return \App\Models\MergedChannel::where('user_id', Auth::id())
-                                                      ->pluck('name', 'id');
-                    })
-                    ->searchable()
-                    ->preload()
-                    ->required()
-                    ->columnSpanFull(), // Make the select take the full width within the repeater item
-            ])
-            ->addActionLabel('Add Merged Channel')
-            ->collapsible()
-            ->columnSpanFull() // The Repeater itself spans full
-            ->reorderableWithButtons(); // Add reordering capability
-            // ->cloneable() // Optionally make items cloneable
-            // ->grid(1) // Optionally define how many items per row in the repeater itself, default is usually 1.
+        return Forms\Components\Select::make('mergedChannels')
+            ->relationship('mergedChannels', 'name') // Assumes 'name' is the title attribute on MergedChannel
+            ->multiple()
+            ->preload()
+            ->searchable()
+            ->helperText('Select merged channels to include in this playlist.')
+            ->columnSpanFull();
     }
 
     public static function form(Form $form): Form
