@@ -19,6 +19,37 @@ class EditMergedChannel extends EditRecord
         ];
     }
 
+    protected function fillForm(): void
+    {
+        parent::fillForm(); // Call parent to populate the main form fields
+
+        Log::info('EditMergedChannel: fillForm called. Populating sourceChannels repeater manually.');
+
+        $sourceChannelsData = [];
+        // Access the relationship directly. If it's not loaded, Laravel will lazy-load it.
+        if ($this->record && $this->record->sourceChannels) { 
+            $sourceChannelsData = $this->record->sourceChannels->map(function ($relatedChannel) {
+                // $relatedChannel is an instance of App\Models\Channel
+                // 'source_channel_id' is the name of the Select field in the Repeater
+                // 'priority' is the name of the TextInput field for priority in the Repeater
+                return [
+                    'source_channel_id' => $relatedChannel->id,       // The ID of the related Channel model
+                    'priority'          => $relatedChannel->pivot->priority, // The priority from the pivot table
+                    // 'selected_channel_url' will be populated by the reactive select's afterStateUpdated
+                ];
+            })->toArray();
+            
+            Log::info('EditMergedChannel: Prepared sourceChannelsData for repeater.', ['data_count' => count($sourceChannelsData), 'data' => $sourceChannelsData]);
+
+        } else {
+            Log::info('EditMergedChannel: No record or sourceChannels relationship found/loaded for populating repeater.');
+        }
+
+        // Fill the 'sourceChannels' field in the form with the prepared data.
+        $this->form->fill(['sourceChannels' => $sourceChannelsData]);
+        Log::info('EditMergedChannel: Form fill attempted for sourceChannels data.');
+    }
+
     protected function handleRecordUpdate(Model $record, array $data): Model
     {
         $sourceChannelsData = $data['sourceChannels'] ?? [];
