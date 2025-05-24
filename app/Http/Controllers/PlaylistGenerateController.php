@@ -342,9 +342,20 @@ class PlaylistGenerateController extends Controller
             // MergedChannel model does not have an 'enabled' status, so fetch all.
             $mergedChannels = $playlist->mergedChannels()->get();
             foreach ($mergedChannels as $mergedChannel) {
+                $guideNumber = "m" . $mergedChannel->id; // Default fallback GuideNumber
+                if (!empty($mergedChannel->tvg_chno)) {
+                    $guideNumber = $mergedChannel->tvg_chno;
+                } elseif (!empty($mergedChannel->tvg_id)) {
+                    $guideNumber = $mergedChannel->tvg_id; 
+                }
+                // No specific fallback to $mergedChannel->name for GuideNumber as it was before,
+                // the m<ID> is a more robust unique fallback if tvg_chno and tvg_id are missing.
+
+                $guideName = !empty($mergedChannel->tvg_name) ? $mergedChannel->tvg_name : $mergedChannel->name;
+
                 $mergedChannelsData[] = [
-                    'GuideNumber' => $mergedChannel->name, // Changed as per requirement
-                    'GuideName'   => $mergedChannel->name,
+                    'GuideNumber' => (string)$guideNumber, // Ensure GuideNumber is explicitly cast to string
+                    'GuideName'   => $guideName,
                     'URL'         => route('mergedChannel.stream', ['mergedChannelId' => $mergedChannel->id, 'format' => 'ts'])
                 ];
             }
