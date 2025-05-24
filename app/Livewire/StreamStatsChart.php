@@ -3,7 +3,9 @@
 namespace App\Livewire;
 
 use Filament\Widgets\ChartWidget;
+use Illuminate\Support\Facades\Log; // Added
 use Illuminate\Support\Facades\Redis;
+use Predis\Connection\ConnectionException; // Added
 
 class StreamStatsChart extends ChartWidget
 {
@@ -17,31 +19,59 @@ class StreamStatsChart extends ChartWidget
 
     protected function getData(): array
     {
-        $labels  = Redis::lrange("mpts:hist:{$this->streamId}:timestamps", 0, -1);
-        $bitrate = array_map('floatval', Redis::lrange("mpts:hist:{$this->streamId}:bitrate", 0, -1));
-        $fps     = array_map('floatval', Redis::lrange("mpts:hist:{$this->streamId}:fps",     0, -1));
+        try {
+            $labels  = Redis::lrange("mpts:hist:{$this->streamId}:timestamps", -60, -1) ?: [];
+            $bitrateData = Redis::lrange("mpts:hist:{$this->streamId}:bitrate", -60, -1) ?: [];
+            $fpsData = Redis::lrange("mpts:hist:{$this->streamId}:fps", -60, -1) ?: [];
 
-        return [
-            'labels'   => $labels ?: [],
-            'datasets' => [
-                [
-                    'label'           => 'Bitrate (kbits/s)',
-                    'data'            => $bitrate,
-                    'borderColor'     => 'rgba(75, 192, 192, 1)',
-                    'backgroundColor' => 'rgba(75, 192, 192, 0.4)',
-                    'yAxisID'         => 'y',
-                    'fill'            => false,
+            $bitrate = array_map('floatval', $bitrateData);
+            $fps     = array_map('floatval', $fpsData);
+
+            return [
+                'labels'   => $labels,
+                'datasets' => [
+                    [
+                        'label'           => 'Bitrate (kbits/s)',
+                        'data'            => $bitrate,
+                        'borderColor'     => 'rgba(75, 192, 192, 1)',
+                        'backgroundColor' => 'rgba(75, 192, 192, 0.4)',
+                        'yAxisID'         => 'y',
+                        'fill'            => false,
+                    ],
+                    [
+                        'label'           => 'FPS',
+                        'data'            => $fps,
+                        'borderColor'     => 'rgba(255, 159, 64, 1)',
+                        'backgroundColor' => 'rgba(255, 159, 64, 0.4)',
+                        'yAxisID'         => 'y1',
+                        'fill'            => false,
+                    ],
                 ],
-                [
-                    'label'           => 'FPS',
-                    'data'            => $fps,
-                    'borderColor'     => 'rgba(255, 159, 64, 1)',
-                    'backgroundColor' => 'rgba(255, 159, 64, 0.4)',
-                    'yAxisID'         => 'y1',
-                    'fill'            => false,
+            ];
+        } catch (ConnectionException $e) {
+            Log::error("Redis connection error in StreamStatsChart for stream {$this->streamId}: " . $e->getMessage());
+            return [
+                'labels'   => [],
+                'datasets' => [
+                    [
+                        'label'           => 'Bitrate (kbits/s)',
+                        'data'            => [],
+                        'borderColor'     => 'rgba(75, 192, 192, 1)',
+                        'backgroundColor' => 'rgba(75, 192, 192, 0.4)',
+                        'yAxisID'         => 'y',
+                        'fill'            => false,
+                    ],
+                    [
+                        'label'           => 'FPS',
+                        'data'            => [],
+                        'borderColor'     => 'rgba(255, 159, 64, 1)',
+                        'backgroundColor' => 'rgba(255, 159, 64, 0.4)',
+                        'yAxisID'         => 'y1',
+                        'fill'            => false,
+                    ],
                 ],
-            ],
-        ];
+            ];
+        }
     }
 
     protected function getType(): string
