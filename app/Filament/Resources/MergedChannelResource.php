@@ -41,14 +41,15 @@ class MergedChannelResource extends Resource
                     ->helperText('Select an EPG channel to source program data for this merged channel.')
                     ->columnSpanFull(),
                 Forms\Components\Repeater::make('sourceChannels')
-                    ->relationship('sourceChannels')
+                    // ->relationship('sourceChannels') // Removed as per instruction
                     ->schema([
                         Forms\Components\Select::make('source_channel_id')
                             ->label('Channel')
                             ->options(Channel::query()->pluck('name', 'id'))
                             ->searchable(['name', 'id'])
                             ->required(),
-                        Forms\Components\NumberInput::make('priority')
+                        Forms\Components\TextInput::make('priority')
+                            ->numeric() // Use TextInput with numeric validation
                             ->required()
                             ->default(0),
                     ])
