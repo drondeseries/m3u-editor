@@ -336,6 +336,29 @@ class CustomPlaylistResource extends Resource
                                         ->description('Manage merged channels associated with this custom playlist.')
                                         ->collapsible()
                                         ->collapsed(false) // Default to open
+                                        ->headerActions([
+                                            Forms\Components\Actions\Action::make('attach_merged_channels_action') // Renamed action for clarity
+                                                ->label('Attach Merged Channels')
+                                                ->form([
+                                                    Forms\Components\Select::make('merged_channel_ids_to_attach')
+                                                        ->label('Select Merged Channels')
+                                                        ->multiple()
+                                                        ->options(function (Get $get, CustomPlaylist $record) {
+                                                            // Get IDs of already attached merged channels for this custom playlist
+                                                            $attachedIds = $record->mergedChannels()->pluck('merged_channels.id')->toArray();
+                                                            // Offer options from MergedChannels belonging to the user, excluding already attached ones
+                                                            return MergedChannel::where('user_id', $record->user_id)
+                                                                ->whereNotIn('id', $attachedIds)
+                                                                ->pluck('name', 'id');
+                                                        })
+                                                        ->preload()
+                                                        ->searchable()
+                                                        ->required(),
+                                                ])
+                                                ->action(function (CustomPlaylist $record, array $data) {
+                                                    $record->mergedChannels()->attach($data['merged_channel_ids_to_attach']);
+                                                }),
+                                        ])
                                         ->schema([
                                             Forms\Components\Repeater::make('mergedChannels') // Named after the relationship
                                                 ->relationship() 
@@ -397,29 +420,6 @@ class CustomPlaylistResource extends Resource
                                                 ->addable(false) // Disable creating new MergedChannels from here
                                                 ->deletable(true)  // Enables detach for BelongsToMany items
                                                 ->columnSpanFull()
-                                                ->headerActions([
-                                                    Forms\Components\Actions\Action::make('attach_merged_channels_action') // Renamed action for clarity
-                                                        ->label('Attach Merged Channels')
-                                                        ->form([
-                                                            Forms\Components\Select::make('merged_channel_ids_to_attach')
-                                                                ->label('Select Merged Channels')
-                                                                ->multiple()
-                                                                ->options(function (Get $get, CustomPlaylist $record) {
-                                                                    // Get IDs of already attached merged channels for this custom playlist
-                                                                    $attachedIds = $record->mergedChannels()->pluck('merged_channels.id')->toArray();
-                                                                    // Offer options from MergedChannels belonging to the user, excluding already attached ones
-                                                                    return MergedChannel::where('user_id', $record->user_id)
-                                                                        ->whereNotIn('id', $attachedIds)
-                                                                        ->pluck('name', 'id');
-                                                                })
-                                                                ->preload()
-                                                                ->searchable()
-                                                                ->required(),
-                                                        ])
-                                                        ->action(function (CustomPlaylist $record, array $data) {
-                                                            $record->mergedChannels()->attach($data['merged_channel_ids_to_attach']);
-                                                        }),
-                                                ])
                                         ])->hiddenOn('create'), // Only show this section on edit
                                 ]),
                             Forms\Components\Tabs\Tab::make('Output')
