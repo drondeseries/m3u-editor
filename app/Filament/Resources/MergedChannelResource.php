@@ -51,6 +51,40 @@ class MergedChannelResource extends Resource
                     ->collapsible()
                     ->columnSpanFull(),
 
+                Forms\Components\Section::make('EPG / TVG Metadata')
+                    ->description('Optional metadata for Electronic Program Guide (EPG) integration.')
+                    ->collapsible()
+                    ->schema([
+                        Forms\Components\TextInput::make('tvg_name')
+                            ->label('TVG Name (Display Name)')
+                            ->helperText('The display name for the channel in the EPG (e.g., "Channel One HD").')
+                            ->nullable()
+                            ->maxLength(255),
+                        Forms\Components\TextInput::make('tvg_id')
+                            ->label('TVG ID (EPG Link ID)')
+                            ->helperText('Unique ID to link this channel to EPG data (e.g., "channel1.epg.com").')
+                            ->nullable()
+                            ->maxLength(255),
+                        Forms\Components\TextInput::make('tvg_logo')
+                            ->label('TVG Logo URL')
+                            ->helperText('URL to an image file for the channel\'s logo.')
+                            ->nullable()
+                            ->url() // Add URL validation
+                            ->maxLength(2048), // URLs can be long
+                        Forms\Components\TextInput::make('tvg_chno')
+                            ->label('TVG Channel Number')
+                            ->helperText('The channel number to display in the EPG (e.g., "101").')
+                            ->nullable()
+                            ->maxLength(255), // String to allow variations like "101.1"
+                        Forms\Components\TextInput::make('tvc_guide_stationid')
+                            ->label('TMC Station ID (e.g., Gracenote ID)')
+                            ->helperText('Specific ID for EPG providers like Gracenote (e.g., "12345").')
+                            ->nullable()
+                            ->maxLength(255),
+                    ])
+                    ->columns(2) // Arrange fields in 2 columns within this section
+                    ->columnSpanFull(),
+
                 Forms\Components\Section::make('Source Channels Configuration')
                     ->schema([
                         Forms\Components\Repeater::make('sourceChannels')

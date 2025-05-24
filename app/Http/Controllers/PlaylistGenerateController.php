@@ -155,20 +155,32 @@ class PlaylistGenerateController extends Controller
 
                 // Process merged channels
                 foreach ($mergedChannels as $mergedChannel) {
-                    $mergedChannelTitle = $mergedChannel->name;
-                    // Use a distinct prefix for merged channel tvg-id to avoid conflicts
-                    $mergedChannelTvgId = "mergedchannel_" . $mergedChannel->id;
-                    $mergedChannelName = $mergedChannel->name;
-                    // Merged channels might not have a direct EPG mapping yet, use placeholder or name
-                    $mergedChannelIcon = url('/placeholder.png'); // Placeholder icon
-                    // Group title for merged channels, can be customized
-                    $mergedChannelGroup = "Merged Channels";
-                    // Merged channels don't have traditional channel numbers from M3U, timeshift, or catchup in the same way
-                    // For now, we'll omit tvg-chno, timeshift. Catchup could be added if MergedChannel model supports it.
+                    $mergedChannelTitle = $mergedChannel->name; // This is the title after #EXTINF:..., so it's okay as is.
+
+                    // Use new tvg_id if available, else default
+                    $tvgId = !empty($mergedChannel->tvg_id) ? $mergedChannel->tvg_id : "mergedchannel_" . $mergedChannel->id;
+
+                    // Use new tvg_name if available, else default to channel's name
+                    $tvgName = !empty($mergedChannel->tvg_name) ? $mergedChannel->tvg_name : $mergedChannel->name;
+
+                    // Use new tvg_logo if available, else default
+                    $tvgLogo = !empty($mergedChannel->tvg_logo) ? $mergedChannel->tvg_logo : url('/placeholder.png');
+                    
+                    // tvg_chno - only add if present
+                    $tvgChnoAttribute = !empty($mergedChannel->tvg_chno) ? " tvg-chno=\"{$mergedChannel->tvg_chno}\"" : "";
+
+                    // tvc_guide_stationid - only add if present
+                    $tvcGuideStationidAttribute = !empty($mergedChannel->tvc_guide_stationid) ? " tvc-guide-stationid=\"{$mergedChannel->tvc_guide_stationid}\"" : "";
+                    
+                    // Group title can remain as is for now, or be made configurable later
+                    $mergedChannelGroup = "Merged Channels"; // Or some other logic if desired later
 
                     $mergedUrl = route('mergedChannel.stream', ['mergedChannelId' => $mergedChannel->id, 'format' => 'ts']);
 
-                    $extInf = "#EXTINF:-1 tvg-id=\"{$mergedChannelTvgId}\" tvg-name=\"{$mergedChannelName}\" tvg-logo=\"{$mergedChannelIcon}\" group-title=\"{$mergedChannelGroup}\"";
+                    $extInf = "#EXTINF:-1 tvg-id=\"{$tvgId}\" tvg-name=\"{$tvgName}\" tvg-logo=\"{$tvgLogo}\"";
+                    $extInf .= $tvgChnoAttribute; // Add tvg-chno if it exists
+                    $extInf .= $tvcGuideStationidAttribute; // Add tvc-guide-stationid if it exists
+                    $extInf .= " group-title=\"{$mergedChannelGroup}\""; // Add group-title
                     echo "$extInf,{$mergedChannelTitle}\n";
                     echo $mergedUrl . "\n";
                 }

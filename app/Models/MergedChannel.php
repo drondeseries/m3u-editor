@@ -15,7 +15,12 @@ class MergedChannel extends Model
     protected $fillable = [
         'name',
         'user_id',
-        'epg_channel_id', // Added epg_channel_id
+        'epg_channel_id',
+        'tvg_id',
+        'tvg_name',
+        'tvg_logo',
+        'tvg_chno',
+        'tvc_guide_stationid',
     ];
 
     /**
