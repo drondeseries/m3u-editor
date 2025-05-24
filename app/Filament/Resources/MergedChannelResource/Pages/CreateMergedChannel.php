@@ -29,4 +29,9 @@ class CreateMergedChannel extends CreateRecord
 
         return $record;
     }
+
+    protected function getRedirectUrl(): string
+    {
+        return $this->getResource()::getUrl('edit', ['record' => $this->record]);
+    }
 }

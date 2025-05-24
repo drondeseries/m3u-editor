@@ -27,37 +27,50 @@ class MergedChannelResource extends Resource
     {
         return $form
             ->schema([
-                Forms\Components\TextInput::make('name')
-                    ->required()
-                    ->maxLength(255)
-                    ->columnSpanFull(),
-                Forms\Components\Select::make('epg_channel_id')
-                    ->relationship('epgChannel', 'name') // Assuming EpgChannel has a 'name' attribute
-                    ->label('EPG Source Channel')
-                    ->options(EpgChannel::query()->pluck('name', 'id')) // Adjust if EpgChannel uses a different display attribute
-                    ->searchable()
-                    ->preload()
-                    ->nullable()
-                    ->helperText('Select an EPG channel to source program data for this merged channel.')
-                    ->columnSpanFull(),
-                Forms\Components\Repeater::make('sourceChannels')
-                    // ->relationship('sourceChannels') // Removed as per instruction
+                Forms\Components\Section::make('Channel Details')
                     ->schema([
-                        Forms\Components\Select::make('source_channel_id')
-                            ->label('Channel')
-                            ->options(Channel::query()->pluck('name', 'id'))
-                            ->searchable(['name', 'id'])
-                            ->required(),
-                        Forms\Components\TextInput::make('priority')
-                            ->numeric() // Use TextInput with numeric validation
+                        Forms\Components\TextInput::make('name')
                             ->required()
-                            ->default(0),
+                            ->maxLength(255),
+                        // ->columnSpanFull(), // Removed to allow section to control span
+                        Forms\Components\Select::make('epg_channel_id')
+                            ->relationship('epgChannel', 'name') // Assuming EpgChannel has a 'name' attribute
+                            ->label('EPG Source Channel')
+                            ->options(EpgChannel::query()->pluck('name', 'id')) // Adjust if EpgChannel uses a different display attribute
+                            ->searchable()
+                            ->preload()
+                            ->nullable()
+                            ->helperText('Select an EPG channel to source program data for this merged channel.'),
+                        // ->columnSpanFull(), // Removed to allow section to control span
                     ])
-                    ->columns(2)
-                    ->defaultItems(1)
-                    ->addActionLabel('Add Source Channel')
-                    ->reorderableWithButtons()
-                    ->collapsible(),
+                    ->collapsible()
+                    ->columnSpanFull(),
+
+                Forms\Components\Section::make('Source Channels Configuration')
+                    ->schema([
+                        Forms\Components\Repeater::make('sourceChannels')
+                            // ->relationship('sourceChannels') // Removed as per instruction
+                            ->schema([
+                                Forms\Components\Select::make('source_channel_id')
+                                    ->label('Channel')
+                                    ->options(Channel::query()->pluck('name', 'id'))
+                                    ->searchable(['name', 'id'])
+                                    ->required(),
+                                Forms\Components\TextInput::make('priority')
+                                    ->numeric() // Use TextInput with numeric validation
+                                    ->required()
+                                    ->default(0)
+                                    ->helperText("Lower numbers indicate higher priority (e.g., 0 is highest). Channels will be tried in order of priority."),
+                            ])
+                            ->columns(2)
+                            ->defaultItems(1)
+                            ->addActionLabel('Add Source Channel')
+                            ->reorderableWithButtons()
+                            ->collapsible()
+                            ->columnSpanFull(), // Repeater itself can span full within its section
+                    ])
+                    ->collapsible()
+                    ->columnSpanFull(),
             ]);
     }
 
