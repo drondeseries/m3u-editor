@@ -169,7 +169,7 @@ class MergedChannelStreamController extends Controller
                 $videoFilter = ''; // Ensure videoFilter is initialized
                 if (str_contains($videoCodec, 'vaapi')) {
                     $hwAccelArgs = "-hwaccel vaapi -hwaccel_device /dev/dri/renderD128 -hwaccel_output_format vaapi ";
-                    $videoFilter = "-vf format=nv12,hwupload "; 
+                    $videoFilter = "-vf scale_vaapi=format=nv12 "; // Modified line for $videoFilter
                 }
 
                 $outputFormatCmd = '';
