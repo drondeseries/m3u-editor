@@ -54,7 +54,7 @@ class MergedChannelResource extends Resource
                 Forms\Components\Section::make('Source Channels Configuration')
                     ->schema([
                         Forms\Components\Repeater::make('sourceChannels')
-                            // ->relationship('sourceChannels') // Removed as per instruction
+                            ->relationship('sourceChannels') // Re-added as per instruction
                             ->schema([
                                 Forms\Components\Select::make('source_channel_id')
                                     ->label('Channel')
