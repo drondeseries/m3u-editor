@@ -165,9 +165,11 @@ class MergedChannelStreamController extends Controller
                 Redis::sadd("stream_stats:active_ids", $app_stream_id); // Add specific attempt
                 Redis::expire("stream_stats:details:{$app_stream_id}", 3600); // 1 hour expiry
 
-                $videoFilter = '';
+                $hwAccelArgs = ""; // Initialize hwAccelArgs
+                $videoFilter = ''; // Ensure videoFilter is initialized
                 if (str_contains($videoCodec, 'vaapi')) {
-                    $videoFilter = '-vf format=nv12,hwupload '; // Modified line
+                    $hwAccelArgs = "-hwaccel vaapi -hwaccel_device /dev/dri/renderD128 -hwaccel_output_format vaapi ";
+                    $videoFilter = "-vf format=nv12,hwupload "; 
                 }
 
                 $outputFormatCmd = '';
@@ -181,19 +183,20 @@ class MergedChannelStreamController extends Controller
                     $outputFormatCmd = "{$videoFilter}-c:v {$videoCodec} -c:a {$audioCodec} -c:s {$subtitleCodec} -f flv pipe:1";
                 }
 
-
                 $cmd = sprintf(
-                    $ffmpegPath . ' ' .
-                    '-user_agent "%s" -referer "%s" ' . // Referer could be configurable too
+                    '%s %s' . // $ffmpegPath, $hwAccelArgs
+                    '-user_agent "%s" -referer "%s" ' .
                     '-multiple_requests 1 -reconnect_on_network_error 1 ' .
                     '-reconnect_on_http_error 5xx,4xx -reconnect_streamed 1 ' .
                     '-reconnect_delay_max %d -noautorotate ' .
-                    '%s' . // User defined args
+                    '%s' . // User defined args ($userArgs)
                     '-re -i "%s" ' . // Input
-                    '%s ' . // Output format command
+                    '%s ' . // Output format command ($outputFormatCmd)
                     '%s',  // Logging
+                    $ffmpegPath,
+                    $hwAccelArgs, // NEW
                     $userAgent,
-                    $request->headers->get('referer') ?: 'http://localhost/', // Dynamic or fixed referer
+                    $request->headers->get('referer') ?: 'http://localhost/',
                     $settings['ffmpeg_reconnect_delay_max'],
                     $userArgs,
                     $streamUrl,
