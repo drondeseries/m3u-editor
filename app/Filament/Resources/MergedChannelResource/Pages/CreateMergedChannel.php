@@ -73,7 +73,46 @@ class CreateMergedChannel extends CreateRecord
         // The $sourceChannelsData variable is still populated from $data['sourceChannels']
         // before it's unset, but it's no longer used in this method.
 
-        Log::info('CreateMergedChannel: handleRecordCreation completed, relying on Filament for relationship sync.', ['final_record_id' => $record->id]);
+        if (!empty($sourceChannelsData)) {
+            $syncData = [];
+            foreach ($sourceChannelsData as $source) {
+                if (!empty($source['source_channel_id'])) {
+                    // 'selected_channel_url' is a UI-only field, do not include it in syncData
+                    $syncData[$source['source_channel_id']] = ['priority' => $source['priority'] ?? 0];
+                }
+            }
+            Log::info('CreateMergedChannel: Data for manual syncing of sourceChannels.', ['sync_data' => $syncData, 'merged_channel_id' => $record->id]);
+            try {
+                $record->sourceChannels()->sync($syncData);
+                Log::info('CreateMergedChannel: sourceChannels manually synced successfully.');
+            } catch (\Exception $e) {
+                Log::error('CreateMergedChannel: Exception during manual sourceChannels sync.', [
+                    'error' => $e->getMessage(),
+                    'trace' => $e->getTraceAsString(), // Consider verbosity
+                    'merged_channel_id' => $record->id,
+                    'sync_data' => $syncData
+                ]);
+                // Depending on desired behavior, one might want to delete the $record here or handle it.
+                throw $e; // Re-throw to notify user of failure
+            }
+        } else {
+            Log::info('CreateMergedChannel: No sourceChannelsData provided for manual sync.');
+            // If an empty array should clear existing relations (it should for sync), ensure sync is called.
+            // $record->sourceChannels()->sync([]); // Uncomment if empty repeater should clear all associations.
+                                                // Usually, if $sourceChannelsData is empty, $syncData will be empty,
+                                                // and sync([]) will detach all. This is often desired.
+                                                // Let's ensure sync is called even with empty $syncData if $sourceChannelsData was present.
+            // The prompt uses $data['sourceChannels'] here, but $data['sourceChannels'] was already unset.
+            // The intention is to check if the repeater was part of the form submission, even if empty.
+            // $sourceChannelsData captures this initial state. If it's an empty array (but not null), it means the repeater was submitted empty.
+            // $this->data holds the original form data before this method is called.
+            if (is_array($sourceChannelsData) && empty($sourceChannelsData) && array_key_exists('sourceChannels', $this->data)) {
+                Log::info('CreateMergedChannel: Empty sourceChannels in form, syncing empty array to detach all.');
+                $record->sourceChannels()->sync([]);
+            }
+        }
+
+        Log::info('CreateMergedChannel: handleRecordCreation completed.', ['final_record_id' => $record->id]);
         return $record;
     }
 
