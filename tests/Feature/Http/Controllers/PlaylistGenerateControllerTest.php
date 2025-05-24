@@ -6,6 +6,7 @@ use App\Models\User;
 use App\Models\CustomPlaylist;
 use App\Models\Channel;
 use App\Models\MergedChannel;
+use App\Enums\PlaylistChannelId; // Added this line
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Route;
 use Tests\TestCase;
@@ -20,7 +21,13 @@ class PlaylistGenerateControllerTest extends TestCase
         $user = User::factory()->create();
         $this->actingAs($user);
 
-        $customPlaylist = CustomPlaylist::factory()->create(['user_id' => $user->id]);
+        // Ensure a highly unique UUID for the CustomPlaylist under test
+        $customPlaylistUuid = 'test_custom_playlist_' . \Illuminate\Support\Str::uuid()->toString();
+        $customPlaylist = CustomPlaylist::factory()->create([
+            'uuid' => $customPlaylistUuid,
+            'user_id' => $user->id,
+            'id_channel_by' => PlaylistChannelId::TvgId->value, // Corrected Enum case
+        ]);
 
         // Create and attach regular channels
         $regularChannel1 = Channel::factory()->create([
@@ -38,15 +45,20 @@ class PlaylistGenerateControllerTest extends TestCase
         $customPlaylist->channels()->attach([$regularChannel1->id, $regularChannel2->id]);
 
         // Create and attach merged channels
+        // Ensure these are as simple and identical as possible beyond what's needed for differentiation
         $mergedChannel1 = MergedChannel::factory()->create([
             'user_id' => $user->id,
-            'name' => 'Merged Channel 1 Name',
+            'name' => 'Test Merged Channel Alpha', 
         ]);
         $mergedChannel2 = MergedChannel::factory()->create([
             'user_id' => $user->id,
-            'name' => 'Merged Channel 2 Name',
+            'name' => 'Test Merged Channel Bravo', 
         ]);
-        $customPlaylist->mergedChannels()->attach([$mergedChannel1->id, $mergedChannel2->id]);
+        // Try with sync instead of attach
+        $customPlaylist->mergedChannels()->sync([$mergedChannel1->id, $mergedChannel2->id]);
+
+        // Diagnostic assertion: Check if both merged channels are associated in the test context
+        $this->assertEquals(2, $customPlaylist->mergedChannels()->count(), "CustomPlaylist should have 2 merged channels after attach.");
 
         // Test Action
         $response = $this->get(route('playlist.hdhr.lineup', ['uuid' => $customPlaylist->uuid]));
@@ -73,14 +85,14 @@ class PlaylistGenerateControllerTest extends TestCase
         // Check for merged channel 1
         $this->assertContainsChannel($jsonResponse, [
             'GuideNumber' => 'merged_' . $mergedChannel1->id,
-            'GuideName' => $mergedChannel1->name,
+            'GuideName' => 'Test Merged Channel Alpha',
             'URL' => route('mergedChannel.stream', ['mergedChannelId' => $mergedChannel1->id, 'format' => 'ts']),
         ]);
 
         // Check for merged channel 2
         $this->assertContainsChannel($jsonResponse, [
             'GuideNumber' => 'merged_' . $mergedChannel2->id,
-            'GuideName' => $mergedChannel2->name,
+            'GuideName' => 'Test Merged Channel Bravo',
             'URL' => route('mergedChannel.stream', ['mergedChannelId' => $mergedChannel2->id, 'format' => 'ts']),
         ]);
     }

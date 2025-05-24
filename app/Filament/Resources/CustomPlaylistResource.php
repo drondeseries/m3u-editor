@@ -8,11 +8,12 @@ use App\Forms\Components\PlaylistEpgUrl;
 use App\Forms\Components\PlaylistM3uUrl;
 use App\Forms\Components\MediaFlowProxyUrl;
 use App\Models\CustomPlaylist;
-use App\Models\MergedChannel; // Added
+use App\Models\MergedChannel;
 use Filament\Forms;
 use Filament\Forms\Form;
-use Illuminate\Support\Facades\Auth; // Added
+use Illuminate\Support\Facades\Auth;
 use Filament\Forms\Get;
+use Filament\Forms\Components\Placeholder; // Added for new display fields
 use Filament\Resources\Resource;
 use Filament\Tables;
 use Filament\Tables\Table;
@@ -193,7 +194,7 @@ class CustomPlaylistResource extends Resource
                 ->helperText('User agent string to use for making requests.')
                 ->default('Mozilla/5.0 (Windows; U; Windows NT 5.1; en-US; rv:1.8.1.13) Gecko/20080311 Firefox/2.0.0.13')
                 ->required(),
-            self::getMergedChannelsFormField(), // Added back here
+            // self::getMergedChannelsFormField(), // Removed as per new requirement for Repeater display
         ];
         if (PlaylistUrlFacade::mediaFlowProxyEnabled()) {
             $schema[] = Forms\Components\Section::make('MediaFlow Proxy')
@@ -325,8 +326,77 @@ class CustomPlaylistResource extends Resource
                             Forms\Components\Tabs\Tab::make('General')
                                 ->columns(2)
                                 ->schema([
-                                    ...$schema, // Spread the existing general schema fields (which now includes MergedChannels)
-                                    // self::getMergedChannelsFormField(), // Removed from here as it's now part of $schema
+                                    ...$schema, // Spread the existing general schema fields
+                                    // New Merged Channels Display and Management Section
+                                    Forms\Components\Section::make('Associated Merged Channels')
+                                        ->description('Manage merged channels associated with this custom playlist.')
+                                        ->collapsible()
+                                        ->collapsed(false) // Default to open
+                                        ->schema([
+                                            Forms\Components\Repeater::make('mergedChannels') // Named after the relationship
+                                                ->relationship() 
+                                                ->schema([
+                                                    Forms\Components\Grid::make(2) // Use a grid for better layout
+                                                        ->schema([
+                                                            Placeholder::make('name_display') // Changed from TextInput
+                                                                ->label('Name')
+                                                                ->content(fn (?MergedChannel $record): string => $record?->name ?? 'N/A'),
+                                                            Placeholder::make('stream_url')
+                                                                ->label('Stream URL')
+                                                                ->content(fn (?MergedChannel $record): string => $record ? route('mergedChannel.stream', ['mergedChannelId' => $record->id, 'format' => 'ts']) : 'N/A')
+                                                                ->helperText('MPEG-TS Stream URL.')
+                                                                ->copyable(), 
+                                                            Placeholder::make('epg_source')
+                                                                ->label('EPG Source')
+                                                                ->content(fn (?MergedChannel $record): string => $record?->epgChannel?->name ?? 'N/A'),
+                                                            Placeholder::make('source_count')
+                                                                ->label('Source Channels')
+                                                                ->content(fn (?MergedChannel $record): string => $record ? $record->sourceChannels()->count() . ' sources' : 'N/A'),
+                                                        ])
+                                                ])
+                                                ->itemLabel(fn (array $state): ?string => 
+                                                    // If Filament loads the related model's attributes into $state:
+                                                    $state['name'] ?? 'Merged Channel Item' 
+                                                )
+                                                ->reorderable(false)
+                                                ->addAction(false) // Disable creating new MergedChannels from here
+                                                ->deletable(true)  // Enables detach for BelongsToMany items
+                                                ->columnSpanFull()
+                                                ->itemActions([
+                                                    Forms\Components\Actions\Action::make('view_merged_channel_item') // Renamed action for clarity
+                                                        ->label('View')
+                                                        ->icon('heroicon-m-eye')
+                                                        ->url(function (CustomPlaylist $playlistRecord, Forms\Components\Repeater $component, string $item): ?string {
+                                                            // $item is the key of the repeater item, which is the ID of the MergedChannel for BelongsToMany
+                                                            $mergedChannel = MergedChannel::find($item); // Fetch the MergedChannel model directly
+                                                            return $mergedChannel ? MergedChannelResource::getUrl('edit', ['record' => $mergedChannel]) : null;
+                                                        })
+                                                        ->openUrlInNewTab(),
+                                                ])
+                                                ->headerActions([
+                                                    Forms\Components\Actions\Action::make('attach_merged_channels_action') // Renamed action for clarity
+                                                        ->label('Attach Merged Channels')
+                                                        ->form([
+                                                            Forms\Components\Select::make('merged_channel_ids_to_attach')
+                                                                ->label('Select Merged Channels')
+                                                                ->multiple()
+                                                                ->options(function (Get $get, CustomPlaylist $record) {
+                                                                    // Get IDs of already attached merged channels for this custom playlist
+                                                                    $attachedIds = $record->mergedChannels()->pluck('merged_channels.id')->toArray();
+                                                                    // Offer options from MergedChannels belonging to the user, excluding already attached ones
+                                                                    return MergedChannel::where('user_id', $record->user_id)
+                                                                        ->whereNotIn('id', $attachedIds)
+                                                                        ->pluck('name', 'id');
+                                                                })
+                                                                ->preload()
+                                                                ->searchable()
+                                                                ->required(),
+                                                        ])
+                                                        ->action(function (CustomPlaylist $record, array $data) {
+                                                            $record->mergedChannels()->attach($data['merged_channel_ids_to_attach']);
+                                                        }),
+                                                ])
+                                        ])->hiddenOn('create'), // Only show this section on edit
                                 ]),
                             Forms\Components\Tabs\Tab::make('Output')
                                 ->columns(2)
