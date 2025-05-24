@@ -167,7 +167,7 @@ class MergedChannelStreamController extends Controller
 
                 $videoFilter = '';
                 if (str_contains($videoCodec, 'vaapi')) {
-                    $videoFilter = '-vf format=nv12 '; // Added space at the end
+                    $videoFilter = '-vf format=nv12,hwupload '; // Modified line
                 }
 
                 $outputFormatCmd = '';
