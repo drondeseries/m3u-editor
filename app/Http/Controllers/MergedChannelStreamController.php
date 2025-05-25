@@ -132,6 +132,8 @@ class MergedChannelStreamController extends Controller
             foreach ($streamUrlsWithOriginalChannel as $streamUrl => $originalChannel) {
                 if ($successfulStream) break;
 
+                $dataActuallyStreamed = false; // <-- ADD THIS LINE: Reset for each new source URL
+
                 $currentSourceChannelId = $originalChannel->id;
                 $app_stream_id = "{$app_stream_id_base}_src{$currentSourceChannelId}"; // Unique ID for this specific source attempt
 
@@ -236,34 +238,37 @@ class MergedChannelStreamController extends Controller
                         foreach ($iterator as $data) {
                             if (connection_aborted()) {
                                 Log::channel('ffmpeg')->info("Connection aborted by client during streaming for MergedChannel {$mergedChannel->id}, Source URL: {$streamUrl}. AppStreamID: {$app_stream_id}");
-                                if ($process->isRunning()) $process->stop(0, SIGKILL); // Force kill
+                                if ($process->isRunning()) $process->stop(0, SIGKILL);
                                 Redis::del("stream_stats:details:{$app_stream_id}");
                                 Redis::srem("stream_stats:active_ids", $app_stream_id);
-                                return; // Exit StreamedResponse callback
+                                return; 
                             }
                             echo $data;
+                            $dataActuallyStreamed = true; // <-- ADD THIS LINE: Set flag when data is output
                             flush();
-                            usleep(10000); // Reduce CPU, similar to original
+                            usleep(10000); 
                         }
-                        // Note: Symfony Process's getIterator with ITER_SKIP_ERR means stderr output is not directly processed here.
-                        // If FFmpeg sends progress to stderr AND the -progress URL, only the URL part is handled by the new API endpoint.
-                        // If FFmpeg sends progress ONLY to stderr (e.g. if -progress URL fails), that would be missed by the API endpoint
-                        // and still logged by the main error logging of the Process component if not caught by getErrorOutput after wait().
                         $process->wait(); 
 
-                        if ($process->isSuccessful()) {
-                            Log::channel('ffmpeg')->info("Stream completed successfully for MergedChannel ID: {$mergedChannel->id}, Source URL: {$streamUrl}. AppStreamID: {$app_stream_id}");
+                        // ---- MODIFIED SECTION START ----
+                        if ($process->isSuccessful() && $dataActuallyStreamed) { 
+                            Log::channel('ffmpeg')->info("Stream completed successfully and data was streamed for MergedChannel ID: {$mergedChannel->id}, Source URL: {$streamUrl}. AppStreamID: {$app_stream_id}");
                             $successfulStream = true;
                             Redis::hset("stream_stats:details:{$app_stream_id}", "status", "completed");
-                            Redis::expire("stream_stats:details:{$app_stream_id}", 600); // Keep completed stats for 10 mins
-                            Redis::srem("stream_stats:active_ids", $app_stream_id); // Remove from active
+                            Redis::expire("stream_stats:details:{$app_stream_id}", 600); 
+                            Redis::srem("stream_stats:active_ids", $app_stream_id); 
                             return; 
-                        } else {
-                            // Log the actual stderr output from FFmpeg process if it failed.
+                        } elseif ($process->isSuccessful() && !$dataActuallyStreamed) {
+                            Log::channel('ffmpeg')->warning("FFmpeg process exited successfully (0) but no actual data was streamed for MergedChannel {$mergedChannel->id}, Source URL: {$streamUrl}. AppStreamID: {$app_stream_id}. Considering this a failure for failover.");
+                            Redis::hset("stream_stats:details:{$app_stream_id}", "status", "failed_no_data_streamed_exit_0");
+                            // $successfulStream remains false, allowing retry or next source
+                        } else { // Process was not successful (non-zero exit code)
                             $errorOutput = $process->getErrorOutput();
                             Log::channel('ffmpeg')->error("FFmpeg process failed for MergedChannel {$mergedChannel->id}, Source URL: {$streamUrl}. Exit code: {$process->getExitCode()}. Output: {$errorOutput}. AppStreamID: {$app_stream_id}");
                             Redis::hset("stream_stats:details:{$app_stream_id}", "status", "failed_process_error");
                         }
+                        // ---- MODIFIED SECTION END ----
+
                     } catch (\Symfony\Component\Process\Exception\ProcessTimedOutException $e) {
                         Log::channel('ffmpeg')->warning("FFmpeg process timed out (idle) for MergedChannel {$mergedChannel->id}, Source URL: {$streamUrl}. Attempt {$attempt}. Error: {$e->getMessage()}. AppStreamID: {$app_stream_id}");
                         Redis::hset("stream_stats:details:{$app_stream_id}", "status", "failed_timeout");
@@ -272,11 +277,11 @@ class MergedChannelStreamController extends Controller
                         Redis::hset("stream_stats:details:{$app_stream_id}", "status", "failed_signaled");
                     } catch (\Exception $e) {
                         Log::channel('ffmpeg')->error("Exception during streaming for MergedChannel {$mergedChannel->id}, Source URL: {$streamUrl}. Attempt {$attempt}. Error: {$e->getMessage()}. AppStreamID: {$app_stream_id}");
-                        if ($process && $process->isRunning()) $process->stop(0, SIGKILL); // Force kill
+                        if ($process && $process->isRunning()) $process->stop(0, SIGKILL);
                         Redis::hset("stream_stats:details:{$app_stream_id}", "status", "failed_exception");
                     }
                     
-                    if ($process && $process->isRunning()) $process->stop(0); // Ensure process is stopped before retrying or moving to next source
+                    if ($process && $process->isRunning()) $process->stop(0); 
                     
                     // If this attempt failed, clean up its specific Redis entry before retrying or moving to next source
                     Redis::del("stream_stats:details:{$app_stream_id}");
