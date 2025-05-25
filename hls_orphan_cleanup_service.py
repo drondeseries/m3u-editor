@@ -170,4 +170,3 @@ if __name__ == "__main__":
     print("Use Ctrl+C to stop the service.")
     main_loop()
     print("--- HLS Orphan Cleanup Service Terminated ---")
-```
