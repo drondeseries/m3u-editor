@@ -36,7 +36,15 @@ class MergedChannelResource extends Resource
                     ->schema([
                         Forms\Components\TextInput::make('name')
                             ->required()
-                            ->maxLength(255),
+                            ->maxLength(255)
+                            ->unique(
+                                table: \App\Models\MergedChannel::class, // Using class constant for table reference
+                                column: 'name',
+                                ignoreRecord: true,
+                                modifyRuleUsing: function (\Illuminate\Validation\Rules\Unique $rule) { // Escaped backslash
+                                    return $rule->where('user_id', \Illuminate\Support\Facades\Auth::id());
+                                }
+                            ),
                         // ->columnSpanFull(), // Removed to allow section to control span
                         Forms\Components\Select::make('epg_channel_id')
                             ->relationship('epgChannel', 'name') // Assuming EpgChannel has a 'name' attribute
