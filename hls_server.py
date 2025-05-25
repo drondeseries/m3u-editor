@@ -4,6 +4,7 @@ from a specified base directory.
 """
 import os
 import logging
+import shutil # Added for shutil.copyfileobj
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from socketserver import ThreadingMixIn # For handling multiple requests
 
@@ -71,23 +72,48 @@ class HLSRequestHandler(SimpleHTTPRequestHandler):
 
         # Send headers and file content
         try:
-            self.send_response(200)
-            self.send_header("Content-type", mime_type)
-            fs = os.fstat(open(abs_file_path, "rb").fileno())
-            self.send_header("Content-Length", str(fs[6]))
-            self.send_header("Last-Modified", self.date_time_string(fs.st_mtime))
-            self.end_headers()
-
             with open(abs_file_path, 'rb') as f:
-                self.copyfile(f, self.wfile)
-            self._log_request_details(200)
+                fs = os.fstat(f.fileno()) # Get stats while file is open
+                
+                # Send response and headers
+                self.send_response(200)
+                self.send_header("Content-type", mime_type) # mime_type already determined
+                self.send_header("Content-Length", str(fs.st_size)) # Use fs.st_size
+                self.send_header("Last-Modified", self.date_time_string(fs.st_mtime))
+                self.end_headers()
+                
+                # Send file content
+                shutil.copyfileobj(f, self.wfile) # Using shutil.copyfileobj
+            self._log_request_details(200) # Log success
+            
+        except FileNotFoundError:
+            # This specific exception might be redundant if os.path.exists was checked earlier,
+            # but good for robustness if file disappears between check and open.
+            logging.warning(f"File not found: {self.path} (resolved to {abs_file_path})")
+            self.send_error(404, "File Not Found")
+            self._log_request_details(404)
+        except PermissionError:
+            logging.warning(f"Permission denied for: {self.path} (resolved to {abs_file_path})")
+            self.send_error(403, "Forbidden")
+            self._log_request_details(403)
         except ConnectionAbortedError:
-            logging.warning(f"Connection aborted by client: {self.client_address[0]}")
+            logging.warning(f"Connection aborted by client while serving {abs_file_path}: {self.client_address[0]}")
+            # Cannot send error to client as connection is gone.
+        except OSError as e:
+            # Catching other OS-level errors, including potential Bad File Descriptor
+            # if 'with' statement didn't fully solve an edge case.
+            logging.error(f"OSError serving file {self.path} (resolved to {abs_file_path}): {e}")
+            # Check if headers were already sent before trying to send an error response.
+            # SimpleHTTPRequestHandler doesn't have a public 'headers_sent' attribute.
+            # A common pattern is to assume if an OSError happens during/after send_response,
+            # it's too late to send a clean error. If it happens before, send_error is okay.
+            # For simplicity here, we'll attempt send_error. It might fail if part of headers sent.
+            self.send_error(500, "Internal Server Error - OSError")
+            self._log_request_details(500)
         except Exception as e:
-            logging.error(f"Error serving file {abs_file_path}: {e}")
-            # Avoid sending another error if headers already sent
-            if not self.headers_sent:
-                self.send_error(500, "Internal Server Error")
+            logging.error(f"Unexpected error serving file {self.path} (resolved to {abs_file_path}): {e}", exc_info=True)
+            # Removing 'if not self.headers_sent:' check
+            self.send_error(500, "Internal Server Error - Unexpected")
             self._log_request_details(500)
 
     def list_directory(self, path):
