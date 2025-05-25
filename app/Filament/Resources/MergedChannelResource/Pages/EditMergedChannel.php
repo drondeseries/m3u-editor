@@ -61,9 +61,40 @@ class EditMergedChannel extends EditRecord
     protected function handleRecordUpdate(Model $record, array $data): Model
     {
         $sourceChannelsData = $data['sourceChannels'] ?? [];
-        unset($data['sourceChannels']); // Remove repeater data from main data array
+        unset($data['sourceChannels']); // Remove repeater data
 
-        $record->update($data);
+        // Explicitly set main attributes, including TVG fields
+        $record->name = $data['name'] ?? $record->name; // Keep existing name if not provided
+        $record->epg_channel_id = $data['epg_channel_id'] ?? null; // Set to null if not provided
+
+        // Explicitly set TVG fields from $data if they exist, otherwise retain original or set to null/empty
+        // For TVG fields, if they are not in $data, it means they were not part of the form submission
+        // (e.g., hidden by conditional logic or not included in $fillable if that was an issue, though less likely for fillable).
+        // The behavior here is to update them if present in $data, otherwise they remain as they are on $record.
+        // If the intention is to NULL them out if not present, then a different approach would be needed
+        // (e.g. $record->tvg_id = $data['tvg_id'] ?? null; for all TVG fields)
+        // Given the problem description, we only update if key_exists.
+
+        if (array_key_exists('tvg_id', $data)) {
+            $record->tvg_id = $data['tvg_id'];
+        }
+        if (array_key_exists('tvg_name', $data)) {
+            $record->tvg_name = $data['tvg_name'];
+        }
+        if (array_key_exists('tvg_logo', $data)) {
+            $record->tvg_logo = $data['tvg_logo'];
+        }
+        if (array_key_exists('tvg_chno', $data)) {
+            $record->tvg_chno = $data['tvg_chno'];
+        }
+        if (array_key_exists('tvc_guide_stationid', $data)) {
+            $record->tvc_guide_stationid = $data['tvc_guide_stationid'];
+        }
+        
+        // Log what is about to be saved from the main $data array, excluding sourceChannels
+        // Log::info('EditMergedChannel: Data being saved to record (excluding sourceChannels)', ['data_to_save' => $data, 'record_id' => $record->id]);
+
+        $record->save();
 
         // Manual sync logic for sourceChannels removed.
         // Filament's Repeater with ->relationship('sourceChannels') will handle this.
