@@ -53,8 +53,7 @@ class MergedChannelsRelationManager extends RelationManager
                     ->placeholder('N/A'),
                 Tables\Columns\TextColumn::make('sourceChannels_count')
                     ->counts('sourceChannels')
-                    ->label('Sources')
-                    ->sortable(),
+                    ->label('Sources'),
                 Tables\Columns\TextColumn::make('stream_url')
                     ->label('Stream URL')
                     ->getStateUsing(fn (MergedChannel $record): string => route('mergedChannel.stream', ['mergedChannelId' => $record->id, 'format' => 'ts']))
