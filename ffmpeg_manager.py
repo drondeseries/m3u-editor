@@ -105,33 +105,48 @@ def start_master_stream(original_url: str, channel_id: str) -> str | None:
 
     # Launch FFmpeg
     ffmpeg_pid = None
-    try:
-        with open(ffmpeg_log_file, 'wb') as log_fp:
-            process = subprocess.Popen(
-                ffmpeg_cmd_args,
-                stdin=ffmpeg_process_stdin, # Handles input from wrapper if implemented
-                stdout=log_fp,
-                stderr=log_fp,
-                start_new_session=True # Detach from parent
-            )
-            ffmpeg_pid = process.pid
-            print(f"FFmpeg process started with PID: {ffmpeg_pid} for channel: {channel_id}. Logging to: {ffmpeg_log_file}")
+    
+    # Prepare FFREPORT environment variable for FFmpeg
+    # ffmpeg_log_file path is already defined: os.path.join(hls_output_path, "ffmpeg.log")
+    # Ensure the log path uses forward slashes for FFREPORT, especially on Windows, though FFmpeg might handle it.
+    # For safety, explicitly convert. Python's os.path.join behaves correctly for the OS.
+    # FFmpeg's FFREPORT path interpretation is usually flexible.
+    ffreport_val = f"file={ffmpeg_log_file.replace(os.path.sep, '/')}:level=32" # level 32 is INFO
+    current_env = os.environ.copy()
+    current_env["FFREPORT"] = ffreport_val
+    
+    print(f"Setting FFREPORT for FFmpeg: {ffreport_val}")
 
-            # Give FFmpeg a moment to start and potentially fail fast
-            # This is a simple way to check for immediate errors. A more robust check
-            # might involve polling the process or checking for initial playlist creation.
-            time.sleep(2) # Small delay
-            if process.poll() is not None: # Process has terminated
-                # If FFmpeg terminates, and we have a failover process, it should also be cleaned up.
-                if failover_process:
-                    print(f"FFmpeg terminated early. Terminating failover wrapper process PID: {failover_process.pid}")
-                    failover_process.terminate()
-                    try:
-                        failover_process.wait(timeout=5) # Wait for it to terminate
-                    except subprocess.TimeoutExpired:
-                        print(f"Failover wrapper {failover_process.pid} did not terminate gracefully, killing.")
-                        failover_process.kill()
-                raise RuntimeError(f"FFmpeg process {ffmpeg_pid} terminated unexpectedly shortly after start. Check logs at {ffmpeg_log_file}.")
+    try:
+        process = subprocess.Popen(
+            ffmpeg_cmd_args,
+            stdin=ffmpeg_process_stdin, # Handles input from wrapper if implemented
+            # stdout and stderr are not redirected to Python; FFmpeg handles logging via FFREPORT
+            # For true detachment without Python holding pipes, one might use:
+            # stdout=subprocess.DEVNULL, 
+            # stderr=subprocess.DEVNULL,
+            # However, FFREPORT handles logging, so default behavior (inheritance or DEVNULL based on context) is fine.
+            # Removing explicit stdout/stderr redirection is the key change.
+            start_new_session=True, # Detach from parent
+            env=current_env # Pass the modified environment with FFREPORT
+        )
+        ffmpeg_pid = process.pid
+        # Note: The log message now refers to the log file FFmpeg itself is creating.
+        print(f"FFmpeg process started with PID: {ffmpeg_pid} for channel: {channel_id}. FFmpeg internal logging to: {ffmpeg_log_file}")
+
+        # Give FFmpeg a moment to start and potentially fail fast
+        time.sleep(2) # Small delay
+        if process.poll() is not None: # Process has terminated
+            if failover_process:
+                print(f"FFmpeg terminated early. Terminating failover wrapper process PID: {failover_process.pid}")
+                failover_process.terminate()
+                try:
+                    failover_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    print(f"Failover wrapper {failover_process.pid} did not terminate gracefully, killing.")
+                    failover_process.kill()
+            # Include FFREPORT path in error, as FFmpeg is managing this log.
+            raise RuntimeError(f"FFmpeg process {ffmpeg_pid} terminated unexpectedly shortly after start. Check FFmpeg's own log at {ffmpeg_log_file}.")
 
     except (subprocess.SubprocessError, FileNotFoundError, RuntimeError) as e:
         print(f"Error starting FFmpeg for {original_url} (channel: {channel_id}): {e}")
