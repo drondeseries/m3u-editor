@@ -156,6 +156,7 @@ class CustomPlaylistResource extends Resource
     {
         return [
             RelationManagers\ChannelsRelationManager::class,
+            RelationManagers\MergedChannelsRelationManager::class, // Added
             RelationManagers\TagsRelationManager::class,
         ];
     }
@@ -380,112 +381,8 @@ class CustomPlaylistResource extends Resource
                                         ->dehydrated(false) // don't save the value in the database
                                 ])
                         ]),
-                    // New Merged Channels Display and Management Section (Moved Here)
-                    Forms\Components\Section::make('Associated Merged Channels')
-                        ->description('Manage merged channels associated with this custom playlist.')
-                        ->collapsible()
-                        ->collapsed(false) // Default to open
-                        ->headerActions([
-                            Forms\Components\Actions\Action::make('attach_merged_channels_action') // Renamed action for clarity
-                                ->label('Attach Merged Channels')
-                                ->form([
-                                    Forms\Components\Select::make('merged_channel_ids_to_attach')
-                                        ->label('Select Merged Channels')
-                                        ->multiple()
-                                        ->options(function (Get $get, CustomPlaylist $record) {
-                                            // Get IDs of already attached merged channels for this custom playlist
-                                            $attachedIds = $record->mergedChannels()->pluck('merged_channels.id')->toArray();
-                                            // Offer options from MergedChannels belonging to the user, excluding already attached ones
-                                            return MergedChannel::where('user_id', $record->user_id)
-                                                ->whereNotIn('id', $attachedIds)
-                                                ->pluck('name', 'id');
-                                        })
-                                        ->preload()
-                                        ->searchable()
-                                        ->required(),
-                                ])
-                                ->action(function (CustomPlaylist $record, array $data) {
-                                    $record->mergedChannels()->attach($data['merged_channel_ids_to_attach']);
-                                }),
-                        ])
-                        ->schema([
-                            Forms\Components\Repeater::make('mergedChannels') // Named after the relationship
-                                ->relationship()
-                                ->schema([
-                                    Forms\Components\Grid::make(2)->columnSpanFull() // Changed to 2 columns, spans full
-                                        ->schema([
-                                            // Row 1
-                                            Placeholder::make('name_display')
-                                                ->label('Name')
-                                                ->columnSpan(1)
-                                                ->content(function (?MergedChannel $record): ?HtmlString {
-                                                    if (!$record || !$record->exists) {
-                                                        return new HtmlString(htmlspecialchars($record?->name ?? 'N/A'));
-                                                    }
-                                                    $url = MergedChannelResource::getUrl('edit', ['record' => $record->id]);
-                                                    $name = htmlspecialchars($record->name ?? 'View Details');
-                                                    return new HtmlString("<a href='{$url}' target='_blank' style='text-decoration: underline; color: #06c;'>{$name}</a>");
-                                                }),
-                                            Placeholder::make('tvg_chno_display')
-                                                ->label('TVG ChNo')
-                                                ->columnSpan(1)
-                                                ->content(fn (?MergedChannel $record): string => $record?->tvg_chno ?? 'N/A'),
-                                            
-                                            // Row 2
-                                            Forms\Components\TextInput::make('stream_url_display')
-                                                ->label('Stream URL')
-                                                ->columnSpan(1)
-                                                ->disabled()
-                                                ->formatStateUsing(fn (?MergedChannel $record): string => $record ? route('mergedChannel.stream', ['mergedChannelId' => $record->id, 'format' => 'ts']) : 'N/A')
-                                                ->helperText('MPEG-TS Stream URL.')
-                                                ->suffixAction(
-                                                    \Filament\Forms\Components\Actions\Action::make('copyUrl')
-                                                        ->icon('heroicon-o-clipboard-document')
-                                                        ->label('') // Ensure no text label, just icon
-                                                        ->tooltip('Copy Stream URL')
-                                                        ->action(null) // No server-side action needed
-                                                        ->extraAttributes([
-                                                            'onclick' => new \Illuminate\Support\HtmlString(
-                                                                "navigator.clipboard.writeText(this.closest('.fi-input-wrp').querySelector('input').value)" .
-                                                                ".then(() => { Filament.notify('success', 'URL copied to clipboard'); })" .
-                                                                ".catch(err => { Filament.notify('danger', 'Failed to copy URL'); console.error('Failed to copy: ', err); });"
-                                                            ),
-                                                            'style' => 'margin-left: -0.5rem; padding: 0.25rem;'
-                                                        ])
-                                                ),
-                                            Placeholder::make('tvg_id_display')
-                                                ->label('TVG ID')
-                                                ->columnSpan(1)
-                                                ->content(fn (?MergedChannel $record): string => $record?->tvg_id ?? 'N/A'),
-
-                                            // Row 3
-                                            Placeholder::make('epg_source')
-                                                ->label('EPG Source')
-                                                ->columnSpan(1)
-                                                ->content(fn (?MergedChannel $record): string => $record?->epgChannel?->name ?? 'N/A'),
-                                            Placeholder::make('source_count')
-                                                ->label('Source Channels')
-                                                ->columnSpan(1)
-                                                ->content(fn (?MergedChannel $record): string => $record ? $record->sourceChannels()->count() . ' sources' : 'N/A'),
-
-                                            // Row 4
-                                            Placeholder::make('tvg_logo_display')
-                                                ->label('TVG Logo URL')
-                                                ->columnSpan(2) // Spans full width of the 2-column grid
-                                                ->content(fn (?MergedChannel $record): string => $record?->tvg_logo ?? 'N/A'),
-                                        ])
-                                ])
-                                ->itemLabel(fn (array $state): ?string =>
-                                    // If Filament loads the related model's attributes into $state:
-                                    $state['name'] ?? 'Merged Channel Item' 
-                                )
-                                ->reorderable(false)
-                                ->addable(false) // Disable creating new MergedChannels from here
-                                ->deletable(true)  // Enables detach for BelongsToMany items
-                                ->columnSpanFull()
-                        ])
-                        ->hiddenOn('create') // Only show this section on edit
-                        ->columnSpanFull(), // Make it span full width in the parent grid
+                    // The Forms\Components\Section::make('Associated Merged Channels') has been removed from here.
+                    // It will now be handled by MergedChannelsRelationManager.
                 ]),
 
         ];
