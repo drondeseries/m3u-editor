@@ -4,6 +4,7 @@ Depends on stream_tracker.py to record stream information.
 """
 import os
 import subprocess
+import time # Added to resolve NameError for time.sleep()
 import stream_tracker # Assumes stream_tracker.py is in the same directory or PYTHONPATH
 import shutil # For cleanup in start_master_stream if add_stream fails
 
