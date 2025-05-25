@@ -107,15 +107,25 @@ def start_master_stream(original_url: str, channel_id: str) -> str | None:
     ffmpeg_pid = None
     
     # Prepare FFREPORT environment variable for FFmpeg
-    # ffmpeg_log_file path is already defined: os.path.join(hls_output_path, "ffmpeg.log")
-    # Ensure the log path uses forward slashes for FFREPORT, especially on Windows, though FFmpeg might handle it.
-    # For safety, explicitly convert. Python's os.path.join behaves correctly for the OS.
-    # FFmpeg's FFREPORT path interpretation is usually flexible.
-    ffreport_val = f"file={ffmpeg_log_file.replace(os.path.sep, '/')}:level=32" # level 32 is INFO
+    # The ffmpeg_log_file variable already holds the full target path: os.path.join(hls_output_path, "ffmpeg.log")
+    
+    # Escape colons in the full path for FFREPORT
+    # Example: /mnt/hls_streams/stream:channel123/ffmpeg.log -> /mnt/hls_streams/stream\:channel123/ffmpeg.log
+    # The .replace(os.path.sep, '/') was for ensuring forward slashes, which is generally good for FFmpeg paths.
+    # We should apply that first, then escape colons.
+    normalized_log_path = ffmpeg_log_file.replace(os.path.sep, '/')
+    escaped_log_path_for_ffreport = normalized_log_path.replace(":", "\\:")
+
+    ffreport_val = f"file={escaped_log_path_for_ffreport}:level=32" # level 32 is INFO
+    
     current_env = os.environ.copy()
     current_env["FFREPORT"] = ffreport_val
     
-    print(f"Setting FFREPORT for FFmpeg: {ffreport_val}")
+    # Updated logging for clarity
+    print(f"Raw FFREPORT log path: {ffmpeg_log_file}") # Original path with OS-specific separators
+    print(f"Normalized FFREPORT log path (for FFmpeg): {normalized_log_path}") 
+    print(f"Escaped FFREPORT log path (for FFREPORT variable): {escaped_log_path_for_ffreport}")
+    print(f"Final FFREPORT value for FFmpeg: {ffreport_val}")
 
     try:
         process = subprocess.Popen(
