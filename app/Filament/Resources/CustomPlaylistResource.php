@@ -410,13 +410,14 @@ class CustomPlaylistResource extends Resource
                         ])
                         ->schema([
                             Forms\Components\Repeater::make('mergedChannels') // Named after the relationship
-                                ->relationship() 
+                                ->relationship()
                                 ->schema([
-                                    Forms\Components\Grid::make(4) // Changed to 4 columns
+                                    Forms\Components\Grid::make(2)->columnSpanFull() // Changed to 2 columns, spans full
                                         ->schema([
+                                            // Row 1
                                             Placeholder::make('name_display')
                                                 ->label('Name')
-                                                ->columnSpan(1) // Explicitly set column span
+                                                ->columnSpan(1)
                                                 ->content(function (?MergedChannel $record): ?HtmlString {
                                                     if (!$record || !$record->exists) {
                                                         return new HtmlString(htmlspecialchars($record?->name ?? 'N/A'));
@@ -425,9 +426,15 @@ class CustomPlaylistResource extends Resource
                                                     $name = htmlspecialchars($record->name ?? 'View Details');
                                                     return new HtmlString("<a href='{$url}' target='_blank' style='text-decoration: underline; color: #06c;'>{$name}</a>");
                                                 }),
-                                            Forms\Components\TextInput::make('stream_url_display') // Changed name to avoid conflict if 'stream_url' is a real attribute
+                                            Placeholder::make('tvg_chno_display')
+                                                ->label('TVG ChNo')
+                                                ->columnSpan(1)
+                                                ->content(fn (?MergedChannel $record): string => $record?->tvg_chno ?? 'N/A'),
+                                            
+                                            // Row 2
+                                            Forms\Components\TextInput::make('stream_url_display')
                                                 ->label('Stream URL')
-                                                ->columnSpan(1) // Explicitly set column span
+                                                ->columnSpan(1)
                                                 ->disabled()
                                                 ->formatStateUsing(fn (?MergedChannel $record): string => $record ? route('mergedChannel.stream', ['mergedChannelId' => $record->id, 'format' => 'ts']) : 'N/A')
                                                 ->helperText('MPEG-TS Stream URL.')
@@ -446,17 +453,29 @@ class CustomPlaylistResource extends Resource
                                                             'style' => 'margin-left: -0.5rem; padding: 0.25rem;'
                                                         ])
                                                 ),
+                                            Placeholder::make('tvg_id_display')
+                                                ->label('TVG ID')
+                                                ->columnSpan(1)
+                                                ->content(fn (?MergedChannel $record): string => $record?->tvg_id ?? 'N/A'),
+
+                                            // Row 3
                                             Placeholder::make('epg_source')
                                                 ->label('EPG Source')
-                                                ->columnSpan(1) // Explicitly set column span
+                                                ->columnSpan(1)
                                                 ->content(fn (?MergedChannel $record): string => $record?->epgChannel?->name ?? 'N/A'),
                                             Placeholder::make('source_count')
                                                 ->label('Source Channels')
-                                                ->columnSpan(1) // Explicitly set column span
+                                                ->columnSpan(1)
                                                 ->content(fn (?MergedChannel $record): string => $record ? $record->sourceChannels()->count() . ' sources' : 'N/A'),
+
+                                            // Row 4
+                                            Placeholder::make('tvg_logo_display')
+                                                ->label('TVG Logo URL')
+                                                ->columnSpan(2) // Spans full width of the 2-column grid
+                                                ->content(fn (?MergedChannel $record): string => $record?->tvg_logo ?? 'N/A'),
                                         ])
                                 ])
-                                ->itemLabel(fn (array $state): ?string => 
+                                ->itemLabel(fn (array $state): ?string =>
                                     // If Filament loads the related model's attributes into $state:
                                     $state['name'] ?? 'Merged Channel Item' 
                                 )
