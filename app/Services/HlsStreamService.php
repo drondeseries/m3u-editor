@@ -28,6 +28,7 @@ class HlsStreamService
         $title,
         $userAgent = null,
     ): int {
+        Log::debug("[HlsStreamService] STARTSTREAM - Channel ID: " . $id . ", Stream URL: " . $streamUrl);
         // Only start one FFmpeg per channel at a time
         $cacheKey = "hls:pid:{$id}";
         $pid = Cache::get($cacheKey);
@@ -153,7 +154,8 @@ class HlsStreamService
             $process = proc_open($cmd, $descriptors, $pipes);
 
             if (!is_resource($process)) {
-                Log::channel('ffmpeg')->error("Failed to launch FFmpeg for channel {$id}");
+                // Log::channel('ffmpeg')->error("Failed to launch FFmpeg for channel {$id}"); // Kept original for ffmpeg channel
+                Log::error("[HlsStreamService] Failed to launch FFmpeg for channel {$id}. CMD: " . $cmd); // Logging to default channel
                 abort(500, 'Could not start stream.');
             }
 
@@ -217,8 +219,12 @@ class HlsStreamService
                 'source_stream_url' => $streamUrl,
                 'ffmpeg_command' => $cmd,
             ];
+            Log::debug("[HlsStreamService] Attempting Redis HMSET for stream_stats:details:" . $app_stream_id . " with data: ", $streamData);
             Redis::hmset("stream_stats:details:{$app_stream_id}", $streamData);
+            Log::debug("[HlsStreamService] Redis HMSET presumably complete for stream_stats:details:" . $app_stream_id);
+            Log::debug("[HlsStreamService] Attempting Redis SADD for stream_stats:active_ids, AppStreamID: " . $app_stream_id);
             Redis::sadd("stream_stats:active_ids", $app_stream_id);
+            Log::debug("[HlsStreamService] Redis SADD presumably complete for stream_stats:active_ids, AppStreamID: " . $app_stream_id);
             Redis::expire("stream_stats:details:{$app_stream_id}", 10800); // 3 hours expiry
 
         }

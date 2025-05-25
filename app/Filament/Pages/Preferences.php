@@ -103,6 +103,13 @@ class Preferences extends SettingsPage
                                             ->default(3)
                                             ->minValue(0)
                                             ->helperText('If the FFMpeg process crashes or fails for any reason, how many times should it try to reconnect before aborting?'),
+                                        Forms\Components\TextInput::make('ffmpeg_hls_list_size')
+                                            ->label('FFmpeg HLS List Size')
+                                            ->numeric()
+                                            ->minValue(1)
+                                            ->default(12)
+                                            ->columnSpan(1)
+                                            ->helperText('Number of segments in HLS playlists. Default is 12. Affects client buffer length.'),
                                         Forms\Components\TextInput::make('ffmpeg_user_agent')
                                             ->label('User agent')
                                             ->required()

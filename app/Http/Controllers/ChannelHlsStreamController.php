@@ -49,6 +49,7 @@ class ChannelHlsStreamController extends Controller
      */
     public function __invoke(Request $request, $encodedId, $encodedPlaylist = null)
     {
+        Log::debug("[ChannelHlsStreamController] INVOKE START - Encoded ID: " . $encodedId);
         // Find the channel by ID
         if (strpos($encodedId, '==') === false) {
             $encodedId .= '=='; // right pad to ensure proper decoding
@@ -63,15 +64,18 @@ class ChannelHlsStreamController extends Controller
             $title = strip_tags($title);
             $playlist = $channel->playlist;
             try {
+                Log::debug("[ChannelHlsStreamController] Calling HlsStreamService->startStream for Channel ID: " . $channelId);
                 $this->hlsService->startStream(
                     id: $channelId,
                     streamUrl: $streamUrl,
                     title: $title,
                     userAgent: $playlist->user_agent ?? null,
                 );
-                Log::channel('ffmpeg')->info("Started HLS stream for channel {$channelId} ({$title})");
+                Log::debug("[ChannelHlsStreamController] HlsStreamService->startStream presumably completed for Channel ID: " . $channelId);
+                // Log::channel('ffmpeg')->info("Started HLS stream for channel {$channelId} ({$title})"); // Kept original for ffmpeg channel
             } catch (Exception $e) {
-                Log::channel('ffmpeg')->error("Failed to start HLS stream for channel {$channelId} ({$title}): {$e->getMessage()}");
+                Log::error("[ChannelHlsStreamController] Failed to start HLS stream for channel {$channelId} ({$title}): {$e->getMessage()}"); // Logging to default channel
+                // Log::channel('ffmpeg')->error("Failed to start HLS stream for channel {$channelId} ({$title}): {$e->getMessage()}"); // Kept original for ffmpeg channel
                 abort(500, 'Failed to start the stream.');
             }
         } else {
