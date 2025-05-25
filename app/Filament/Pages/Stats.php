@@ -38,7 +38,7 @@ class Stats extends Page
     {
         $this->activeStreamDetails = [];
         try {
-            $activeIds = Redis::smembers('mpts:active_ids');
+            $activeIds = Redis::smembers('stream_stats:active_ids'); // Updated Redis key
             
             if (empty($activeIds)) {
                 // If no active IDs, ensure details are empty and return
@@ -46,13 +46,22 @@ class Stats extends Page
             }
 
             $details = [];
-            foreach ($activeIds as $clientKey) {
-                $parts = explode('::', $clientKey);
-                if (count($parts) < 2) {
-                    continue; // Invalid format
+            foreach ($activeIds as $streamKey) { // Renamed variable for clarity
+                $parts = explode('_', $streamKey); // Split by underscore for new format
+
+                // Basic validation for the new format (e.g., type_channelId_...)
+                if (count($parts) < 2) { 
+                    Log::warning("Invalid stream key format from Redis: {$streamKey}");
+                    continue; 
                 }
-                $client_ip = $parts[0];
+
+                // Assuming format is like 'hls_CHANNELID_PID' or 'direct_CHANNELID_CLIENTKEY_PID'
+                // The channel_id is expected to be the second part.
                 $channel_id = $parts[1];
+                
+                // Client IP is not directly available in the new key format in a consistent way.
+                // Set to "N/A" as per subtask instructions.
+                $client_ip = "N/A"; 
 
                 $channel = Channel::find($channel_id);
 
@@ -60,13 +69,12 @@ class Stats extends Page
                     $details[] = [
                         'channel_id' => $channel->id,
                         'title' => $channel->title ?? 'Unknown Title',
-                        'client_ip' => $client_ip,
-                        'proxy_url' => $channel->proxy_url, // Assuming proxy_url exists on Channel model
-                        'owner_name' => $channel->user->name ?? ($channel->user ? 'Owner Name Missing' : 'N/A'),
+                        'client_ip' => $client_ip, // Updated client_ip handling
+                        'proxy_url' => $channel->proxy_url, 
+                        'owner_name' => $channel->user?->name ?? 'N/A', // Adjusted for potentially null user
                     ];
                 } else {
-                    // Optionally handle case where channel is not found but ID was in Redis
-                    Log::warning("Channel ID {$channel_id} from Redis active_ids not found in database.");
+                    Log::warning("Channel ID {$channel_id} from Redis stream_stats:active_ids not found in database. Key: {$streamKey}");
                 }
             }
             $this->activeStreamDetails = $details;
@@ -76,8 +84,7 @@ class Stats extends Page
             // $this->activeStreamDetails is already empty or as set before error
         }
         
-        // Explicitly pass the data to the view. For Filament Pages, public properties are
-        // typically automatically available, but this makes it explicit.
+        // Explicitly pass the data to the view.
         return ['activeStreamDetails' => $this->activeStreamDetails];
     }
 

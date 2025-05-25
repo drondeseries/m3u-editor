@@ -57,6 +57,9 @@ class HlsStreamService
                 // Ignore
             }
 
+            // Get HLS list size setting
+            $hlsListSize = $userPreferences->ffmpeg_hls_list_size ?? 12;
+
             // Get user agent
             if (!$userAgent) {
                 $userAgent = escapeshellarg($settings['ffmpeg_user_agent']);
@@ -118,7 +121,7 @@ class HlsStreamService
                     '-preset veryfast -g 15 -keyint_min 15 -sc_threshold 0 ' .
                     '%s ' . // output format
                     // HLS options:
-                    '-f hls -hls_time 2 -hls_list_size 6 ' .
+                    '-f hls -hls_time 2 -hls_list_size %d ' . // Use %d for integer
                     '-hls_flags delete_segments+append_list+independent_segments ' .
                     '-use_wallclock_as_timestamps 1 ' .
                     '-hls_segment_filename %s ' .
@@ -130,6 +133,7 @@ class HlsStreamService
                 $userArgs,                    // user defined options
                 $streamUrl,                   // input URL
                 $outputFormat,                // output format
+                $hlsListSize,                 // HLS list size
                 $segment,                     // segment filename
                 $segmentBaseUrl,              // base URL for segments
                 $m3uPlaylist,                 // playlist filename

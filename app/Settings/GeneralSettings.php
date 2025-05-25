@@ -25,6 +25,7 @@ class GeneralSettings extends Settings
     public ?string $mediaflow_proxy_user_agent = null;
     public ?bool $mediaflow_proxy_playlist_user_agent = false;
     public ?string $ffmpeg_path = null;
+    public ?int $ffmpeg_hls_list_size = 12;
 
     public static function group(): string
     {
