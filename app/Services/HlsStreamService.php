@@ -239,6 +239,7 @@ class HlsStreamService
      */
     public function stopStream($id): bool
     {
+        Log::debug("[HlsStreamService] STOPSTREAM - Called for Channel ID: " . $id);
         $cacheKey = "hls:pid:{$id}";
         $pid = Cache::get($cacheKey); // Get PID from cache first
         $wasRunning = false;
@@ -246,19 +247,24 @@ class HlsStreamService
         // Attempt to clean up Redis stats if PID was cached, regardless of current running state
         if ($pid) {
             $app_stream_id = "hls_{$id}_{$pid}";
+            Log::debug("[HlsStreamService] STOPSTREAM - Attempting Redis DEL for stream_stats:details:" . $app_stream_id);
             Redis::del("stream_stats:details:{$app_stream_id}");
+            Log::debug("[HlsStreamService] STOPSTREAM - Attempting Redis SREM for stream_stats:active_ids, AppStreamID: " . $app_stream_id);
             Redis::srem("stream_stats:active_ids", $app_stream_id);
         }
 
         if ($this->isRunning($id)) { // isRunning uses its own Cache::get call, but $pid here is from our earlier call
             $wasRunning = true;
+            Log::debug("[HlsStreamService] STOPSTREAM - PID {$pid} found for channel {$id}. Attempting SIGTERM.");
             // Attempt to gracefully stop the FFmpeg process
             posix_kill($pid, SIGTERM);
             sleep(1);
             if (posix_kill($pid, 0)) {
+                Log::debug("[HlsStreamService] STOPSTREAM - PID {$pid} for channel {$id} still running after SIGTERM. Attempting SIGKILL.");
                 // If the process is still running after SIGTERM, force kill it
                 posix_kill($pid, SIGKILL);
             }
+            Log::debug("[HlsStreamService] STOPSTREAM - Forgetting PID from cache for key: " . $cacheKey);
             Cache::forget($cacheKey); // Forget the PID from cache
 
             // Cleanup on-disk HLS files
@@ -268,15 +274,17 @@ class HlsStreamService
             // If not running, but we had a PID, we've already attempted cleanup.
             // If PID was not in cache, $pid would be null, and no specific app_stream_id cleanup for stats occurs.
             // Log warning if we intended to stop a specific process but it wasn't found running.
+            Log::debug("[HlsStreamService] STOPSTREAM - No running FFmpeg process found for channel {$id} to stop (PID from cache was: " . ($pid ?? 'null') . ").");
             if (Cache::has($cacheKey) && !$pid) { 
                  // This case should ideally not be hit if isRunning uses the same Cache::get logic
                  Log::channel('ffmpeg')->warning("FFmpeg process for channel {$id} was cached but PID not retrieved for stats cleanup, or process already gone.");
-            } else if (!$pid) {
+            } else if (!$pid) { // This condition means $pid was null from the start (not in cache)
                  Log::channel('ffmpeg')->warning("No cached FFmpeg PID for channel {$id} to stop or clean up stats.");
-            } else {
-                 Log::channel('ffmpeg')->warning("No running FFmpeg process for channel {$id} to stop (PID: {$pid}). Stats cleanup attempted.");
+            } else { // This condition means $pid was found in cache, but isRunning($id) returned false
+                 Log::channel('ffmpeg')->warning("No running FFmpeg process for channel {$id} to stop (PID: {$pid} from cache). Stats cleanup attempted.");
             }
             // Ensure cache key is forgotten if it somehow still exists but process is not running
+            Log::debug("[HlsStreamService] STOPSTREAM - Forgetting PID from cache (process not running branch) for key: " . $cacheKey);
             Cache::forget($cacheKey);
         }
 
