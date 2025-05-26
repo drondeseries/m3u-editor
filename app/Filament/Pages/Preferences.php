@@ -110,6 +110,26 @@ class Preferences extends SettingsPage
                                             ->default('VLC/3.0.21 LibVLC/3.0.21')
                                             ->placeholder('VLC/3.0.21 LibVLC/3.0.21')
                                             ->helperText('Fallback user agent (defaults to the streams Playlist user agent, when set).'),
+                                        // VA-API Fields (QSV fields removed)
+                                        Forms\Components\Toggle::make('ffmpeg_vaapi_enabled')
+                                            ->label('Enable VA-API (Video Acceleration API)')
+                                            ->columnSpan('full')
+                                            ->helperText('Uses VA-API for hardware acceleration. Ensure FFmpeg is compiled with VA-API support and /dev/dri/renderD128 (or similar) is accessible.')
+                                            ->live(),
+                                        Forms\Components\TextInput::make('ffmpeg_vaapi_device')
+                                            ->label('VA-API Device Path')
+                                            ->columnSpan('full')
+                                            ->default('/dev/dri/renderD128')
+                                            ->placeholder('/dev/dri/renderD128')
+                                            ->helperText('e.g., /dev/dri/renderD128 or /dev/dri/card0')
+                                            ->hidden(fn (Get $get): bool => !$get('ffmpeg_vaapi_enabled')),
+                                        Forms\Components\TextInput::make('ffmpeg_vaapi_video_filter')
+                                            ->label('VA-API Video Filter')
+                                            ->columnSpan('full')
+                                            ->default('scale_vaapi=format=nv12')
+                                            ->placeholder('scale_vaapi=format=nv12')
+                                            ->helperText("e.g., scale_vaapi=w=1280:h=720:format=nv12. Applied using -vf. Ensure 'format=' is usually nv12 or vaapi.")
+                                            ->hidden(fn (Get $get): bool => !$get('ffmpeg_vaapi_enabled')),
                                         $this->makeCodecSelect('video', 'ffmpeg_codec_video', 'videoCodecs'),
                                         $this->makeCodecSelect('audio', 'ffmpeg_codec_audio', 'audioCodecs'),
                                         $this->makeCodecSelect('subtitle', 'ffmpeg_codec_subtitles', 'subtitleCodecs'),

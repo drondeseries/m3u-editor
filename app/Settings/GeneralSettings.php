@@ -25,6 +25,9 @@ class GeneralSettings extends Settings
     public ?string $mediaflow_proxy_user_agent = null;
     public ?bool $mediaflow_proxy_playlist_user_agent = false;
     public ?string $ffmpeg_path = null;
+    public bool $ffmpeg_vaapi_enabled = false;
+    public string $ffmpeg_vaapi_device = '/dev/dri/renderD128';
+    public string $ffmpeg_vaapi_video_filter = 'scale_vaapi=format=nv12';
 
     public static function group(): string
     {

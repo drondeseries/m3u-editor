@@ -199,57 +199,75 @@ class StreamController extends Controller
                 $ffmpegPath = 'jellyfin-ffmpeg';
             }
 
-            // Get ffmpeg output codec formats
+            // Initialize FFmpeg command argument variables
+            $hwaccelInitArgs = '';
+            $hwaccelArgs = '';
+            $videoFilterArgs = '';
+            $codecSpecificArgs = ''; // For QSV or other codec-specific args not part of -vf
+
+            // Get base ffmpeg output codec formats (these are defaults or from non-QSV/VA-API settings)
             $videoCodec = config('proxy.ffmpeg_codec_video') ?: $settings['ffmpeg_codec_video'];
             $audioCodec = config('proxy.ffmpeg_codec_audio') ?: $settings['ffmpeg_codec_audio'];
             $subtitleCodec = config('proxy.ffmpeg_codec_subtitles') ?: $settings['ffmpeg_codec_subtitles'];
 
+            // VA-API Hardware Acceleration Logic (QSV elseif block removed)
+            if ($settings['ffmpeg_vaapi_enabled'] ?? false) {
+                $videoCodec = 'h264_vaapi'; // Default VA-API H.264 encoder
+                $hwaccelInitArgs = "-init_hw_device vaapi=va_device:{$settings['ffmpeg_vaapi_device']} ";
+                $hwaccelArgs = "-hwaccel vaapi -hwaccel_device va_device -hwaccel_output_format vaapi ";
+                if (!empty($settings['ffmpeg_vaapi_video_filter'])) {
+                    // Ensure the filter string is properly quoted for the -vf argument
+                    $videoFilterArgs = "-vf '" . trim($settings['ffmpeg_vaapi_video_filter'], "'") . "' ";
+                }
+                // $codecSpecificArgs remains empty for VA-API based on current known needs
+                // (already initialized to '' and not set here if VA-API is used)
+            }
+            // No elseif for QSV anymore
+
             // Set the output format and codecs
+            // This $output definition MUST come AFTER $videoCodec might have been changed by VA-API/QSV logic
             $output = $format === 'ts'
                 ? "-c:v $videoCodec -c:a $audioCodec -c:s $subtitleCodec -f mpegts pipe:1"
-                : "-ac 2 -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof pipe:1";
+                : "-c:v $videoCodec -ac 2 -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof pipe:1";
 
             // Determine if it's an MKV file by extension
             $isMkv = stripos($streamUrl, '.mkv') !== false;
-
-            // Enhanced HTTP options for MKV files that often have connection issues
-            $httpOptions = "-user_agent \"$userAgent\" -referer \"MyComputer\" " .
-                '-multiple_requests 1 -reconnect_on_network_error 1 ' .
-                '-reconnect_on_http_error 5xx,4xx -reconnect_streamed 1 ' .
-                '-reconnect_delay_max 5';
-
-            // Add extra options for MKV files
-            if ($isMkv) {
-                $httpOptions .= ' -analyzeduration 10M -probesize 10M';
-            }
-            $httpOptions .= ' -noautorotate';
-
+            
             // Build the FFmpeg command
-            $cmd = sprintf(
-                $ffmpegPath . ' ' .
-                    // Pre-input HTTP options:
-                    '%s ' .
+            $cmd = $ffmpegPath . ' ';
+            $cmd .= $hwaccelInitArgs; // e.g., -init_hw_device vaapi=va_device:/dev/dri/renderD128
+            $cmd .= $hwaccelArgs;     // e.g., -hwaccel vaapi ... or -hwaccel qsv ...
 
-                    // User defined options:
-                    '%s' .
+            // Pre-input HTTP options: (ensure $userAgent is already escaped - it is, from getStreamSettings)
+            $cmd .= "-user_agent ".$userAgent." -referer \"MyComputer\" " . // $userAgent is already escaped
+                    '-multiple_requests 1 -reconnect_on_network_error 1 ' .
+                    '-reconnect_on_http_error 5xx,4xx -reconnect_streamed 1 ' .
+                    '-reconnect_delay_max 5';
 
-                    // Input:
-                    '-re -i "%s" ' .
+            if ($isMkv) { 
+                $cmd .= ' -analyzeduration 10M -probesize 10M';
+            }
+            $cmd .= ' -noautorotate '; // End of HTTP-related options
 
-                    // Progress tracking:
-                    // '-progress pipe:2 ' . // Disabled for now
+            // User defined general options:
+            $cmd .= $userArgs; // General additional args (already has trailing space if not empty from previous logic)
+            
+            // Codec specific additional arguments (e.g. QSV specific):
+            $cmd .= $codecSpecificArgs; 
 
-                    // Output:
-                    '%s ' .
+            // Input:
+            // Using escapeshellarg for $streamUrl for safety with direct concatenation
+            $cmd .= '-re -i ' . escapeshellarg($streamUrl) . ' ';
 
-                    // Logging:
-                    '%s',
-                $httpOptions,                 // HTTP options
-                $userArgs,                    // user defined options
-                $streamUrl,                   // input URL
-                $output,                      // for -f
-                $settings['ffmpeg_debug'] ? '' : '-hide_banner -nostats -loglevel error'
-            );
+            // Video Filter arguments:
+            $cmd .= $videoFilterArgs; // e.g., -vf 'scale_vaapi=format=nv12' 
+
+            // Output options from $output variable:
+            $cmd .= $output; 
+
+            // Logging:
+            // $cmd .= ($settings['ffmpeg_debug'] ? '' : ' -hide_banner -nostats -loglevel error'); // Old
+            $cmd .= ($settings['ffmpeg_debug'] ? ' -loglevel verbose' : ' -hide_banner -loglevel error'); // New
 
             // Log the command for debugging
             Log::channel('ffmpeg')->info("Streaming channel {$title} with command: {$cmd}");
@@ -298,7 +316,16 @@ class StreamController extends Controller
                                             Log::channel('ffmpeg')->error($line);
                                         }
                                     */
-                                Log::channel('ffmpeg')->error($line);
+                                // Log::channel('ffmpeg')->error($line); // Old behavior
+                                if (preg_match('/speed=\s*([0-9\.]+x)/', $line, $matches)) {
+                                    $speed = $matches[1];
+                                    Log::channel('ffmpeg')->info("FFmpeg speed: {$speed}"); 
+                                    // In a future step, this $speed value will be used for failover decisions.
+                                } elseif (!empty(trim($line))) { // Avoid logging empty lines
+                                    // It's not a speed update, log as original error/info based on context
+                                    // For now, continue logging as error if it's not an empty line from stderr
+                                    Log::channel('ffmpeg')->error($line);
+                                }
                             }
                         }
                     });
@@ -364,6 +391,11 @@ class StreamController extends Controller
                 'ffmpeg_codec_audio' => $userPreferences->ffmpeg_codec_audio ?? $settings['ffmpeg_codec_audio'],
                 'ffmpeg_codec_subtitles' => $userPreferences->ffmpeg_codec_subtitles ?? $settings['ffmpeg_codec_subtitles'],
                 'ffmpeg_path' => $userPreferences->ffmpeg_path ?? $settings['ffmpeg_path'],
+                
+                // Add these lines for VA-API settings
+                'ffmpeg_vaapi_enabled' => $userPreferences->ffmpeg_vaapi_enabled ?? false,
+                'ffmpeg_vaapi_device' => $userPreferences->ffmpeg_vaapi_device ?? '/dev/dri/renderD128',
+                'ffmpeg_vaapi_video_filter' => $userPreferences->ffmpeg_vaapi_video_filter ?? 'scale_vaapi=format=nv12',
             ];
 
             // Add any additional args from config

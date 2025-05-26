@@ -45,6 +45,11 @@ class FfmpegCodecService
                         continue; // Skip experimental encoders
                     }
 
+                    // Log discovered VA-API codecs for confirmation
+                    if (str_contains($codec, '_vaapi')) {
+                        Log::info("Discovered VA-API related codec: $codec - $description");
+                    }
+
                     match ($type) {
                         'V' => $videoCodecs[$codec] = "<strong>$codec</strong></br><small><em>$description</em></small>",
                         'A' => $audioCodecs[$codec] = "<strong>$codec</strong></br><small><em>$description</em></small>",

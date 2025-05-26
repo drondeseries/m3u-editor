@@ -44,6 +44,10 @@ class HlsStreamService
                 'ffmpeg_codec_audio' => 'aac',
                 'ffmpeg_codec_subtitles' => 'copy',
                 'ffmpeg_path' => 'jellyfin-ffmpeg',
+                // VA-API defaults should remain
+                'ffmpeg_vaapi_enabled' => false,
+                'ffmpeg_vaapi_device' => '/dev/dri/renderD128',
+                'ffmpeg_vaapi_video_filter' => 'scale_vaapi=format=nv12',
             ];
             try {
                 $settings = [
@@ -54,6 +58,11 @@ class HlsStreamService
                     'ffmpeg_codec_audio' => $userPreferences->ffmpeg_codec_audio ?? $settings['ffmpeg_codec_audio'],
                     'ffmpeg_codec_subtitles' => $userPreferences->ffmpeg_codec_subtitles ?? $settings['ffmpeg_codec_subtitles'],
                     'ffmpeg_path' => $userPreferences->ffmpeg_path ?? $settings['ffmpeg_path'],
+                    
+                    // VA-API settings should remain
+                    'ffmpeg_vaapi_enabled' => $userPreferences->ffmpeg_vaapi_enabled ?? $settings['ffmpeg_vaapi_enabled'],
+                    'ffmpeg_vaapi_device' => $userPreferences->ffmpeg_vaapi_device ?? $settings['ffmpeg_vaapi_device'],
+                    'ffmpeg_vaapi_video_filter' => $userPreferences->ffmpeg_vaapi_video_filter ?? $settings['ffmpeg_vaapi_video_filter'],
                 ];
             } catch (Exception $e) {
                 // Ignore
@@ -74,6 +83,26 @@ class HlsStreamService
             $videoCodec = config('proxy.ffmpeg_codec_video') ?: $settings['ffmpeg_codec_video'];
             $audioCodec = config('proxy.ffmpeg_codec_audio') ?: $settings['ffmpeg_codec_audio'];
             $subtitleCodec = config('proxy.ffmpeg_codec_subtitles') ?: $settings['ffmpeg_codec_subtitles'];
+
+            // Initialize VA-API and General Hw Accel Argument Variables
+            $hwaccelInitArgs = '';
+            $hwaccelArgs = ''; 
+            $videoFilterArgs = '';
+            $codecSpecificArgs = '';
+
+            // VA-API Hardware Acceleration Logic
+            if ($settings['ffmpeg_vaapi_enabled'] ?? false) {
+                $videoCodec = 'h264_vaapi'; // Default VA-API H.264 encoder for HLS
+                $hwaccelInitArgs = "-init_hw_device vaapi=va_device:{$settings['ffmpeg_vaapi_device']} ";
+                $hwaccelArgs = "-hwaccel vaapi -hwaccel_device va_device -hwaccel_output_format vaapi ";
+                if (!empty($settings['ffmpeg_vaapi_video_filter'])) {
+                    $videoFilterArgs = "-vf '" . trim($settings['ffmpeg_vaapi_video_filter'], "'") . "' ";
+                }
+                // $codecSpecificArgs remains empty for VA-API for HLS based on current needs
+            }
+            // No else/elseif for QSV
+
+            // Update $outputFormat (must be after VA-API logic)
             $outputFormat = "-c:v $videoCodec -c:a $audioCodec -bsf:a aac_adtstoasc -c:s $subtitleCodec";
 
             // Get user defined options
@@ -90,52 +119,43 @@ class HlsStreamService
             }
             File::ensureDirectoryExists($storageDir, 0755);
 
-            // Setup the stream URL
+            // Setup the stream URL (ensure paths are escaped for command line)
             $m3uPlaylist = "{$storageDir}/stream.m3u8";
-            $segment = "{$storageDir}/segment_%03d.ts";
+            $segment = "{$storageDir}/segment_%03d.ts"; // %03d is an ffmpeg pattern, not a variable here.
             $segmentBaseUrl = $type === 'channel'
                 ? url("/api/stream/{$id}") . '/'
                 : url("/api/stream/e/{$id}") . '/';
 
-            $cmd = sprintf(
-                $ffmpegPath . ' ' .
-                    // Optimization options:
-                    '-fflags nobuffer -flags low_delay ' .
+            // Reconstruct FFmpeg Command
+            $cmd = $ffmpegPath . ' ';
+            $cmd .= $hwaccelInitArgs; 
+            $cmd .= $hwaccelArgs;     
 
-                    // Pre-input HTTP options:
-                    '-user_agent "%s" -referer "MyComputer" ' .
+            $cmd .= '-fflags nobuffer -flags low_delay ';
+
+            // Pre-input HTTP options ($userAgent is already escaped from earlier logic):
+            $cmd .= "-user_agent ".$userAgent." -referer \"MyComputer\" " .
                     '-multiple_requests 1 -reconnect_on_network_error 1 ' .
                     '-reconnect_on_http_error 5xx,4xx -reconnect_streamed 1 ' .
-                    '-reconnect_delay_max 5 -noautorotate ' .
+                    '-reconnect_delay_max 5 -noautorotate ';
 
-                    // User defined options:
-                    '%s' .
+            $cmd .= $userArgs; 
+            $cmd .= $codecSpecificArgs; 
 
-                    // I/O options:
-                    '-re -i "%s" ' .
+            $cmd .= '-re -i ' . escapeshellarg($streamUrl) . ' ';
+            $cmd .= $videoFilterArgs; 
+            
+            // $cmd .= '-preset veryfast -g 15 -keyint_min 15 -sc_threshold 0 '; // Removed as per instructions for VA-API
+            $cmd .= $outputFormat . ' ';
 
-                    // Output options:
-                    '-preset veryfast -g 15 -keyint_min 15 -sc_threshold 0 ' .
-                    '%s ' . // output format
-
-                    // HLS options:
-                    '-f hls -hls_time 2 -hls_list_size 6 ' .
+            $cmd .= '-f hls -hls_time 2 -hls_list_size 6 ' .
                     '-hls_flags delete_segments+append_list+independent_segments ' .
                     '-use_wallclock_as_timestamps 1 ' .
-                    '-hls_segment_filename %s ' .
-                    '-hls_base_url %s %s ' .
+                    '-hls_segment_filename ' . escapeshellarg($segment) . ' ' .
+                    '-hls_base_url ' . escapeshellarg($segmentBaseUrl) . ' ' .
+                    escapeshellarg($m3uPlaylist) . ' ';
 
-                    // Logging:
-                    '%s',
-                $userAgent,                   // for -user_agent
-                $userArgs,                    // user defined options
-                $streamUrl,                   // input URL
-                $outputFormat,                // output format
-                $segment,                     // segment filename
-                $segmentBaseUrl,              // base URL for segments (want to make sure routed through the proxy to track active users)
-                $m3uPlaylist,                 // playlist filename
-                $settings['ffmpeg_debug'] ? '' : '-hide_banner -nostats -loglevel error'
-            );
+            $cmd .= ($settings['ffmpeg_debug'] ? '' : ' -hide_banner -nostats -loglevel error');
 
             // Log the command for debugging
             Log::channel('ffmpeg')->info("Streaming channel {$title} with command: {$cmd}");

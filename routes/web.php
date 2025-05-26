@@ -66,6 +66,12 @@ Route::get('/stream/{encodedId}.{format?}', \App\Http\Controllers\StreamControll
 Route::get('/stream/e/{encodedId}.{format?}', [\App\Http\Controllers\StreamController::class, 'episode'])
     ->name('stream.episode');
 
+Route::get('/stream/failover/{failoverChannel}/{format?}', \App\Http\Controllers\FailoverStreamController::class)
+    ->name('stream.failover');
+
+Route::get('/failover/{failoverChannel}/hls/playlist.m3u8', [\App\Http\Controllers\FailoverStreamController::class, 'serveHlsPlaylist'])
+    ->name('failover.hls.playlist');
+
 
 /*
  * API routes
