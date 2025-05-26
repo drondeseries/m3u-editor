@@ -157,7 +157,7 @@ class FailoverStreamController extends Controller
                     'Content-Type' => $format === 'ts' ? 'video/MP2T' : 'video/mp4',
                     'Connection' => 'keep-alive',
                     'Cache-Control' => 'no-store, no-transform',
-                    'Content-Disposition' => "inline; filename="stream.{$format}"",
+                    'Content-Disposition' => 'inline; filename="stream.' . $format . '"',
                     'X-Accel-Buffering' => 'no',
                 ]);
 
