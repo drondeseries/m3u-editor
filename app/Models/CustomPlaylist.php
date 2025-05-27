@@ -10,6 +10,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\MorphToMany;
 use Spatie\Tags\HasTags;
+use App\Models\FailoverChannel;
 
 class CustomPlaylist extends Model
 {
@@ -66,5 +67,10 @@ class CustomPlaylist extends Model
     public function postProcesses(): MorphToMany
     {
         return $this->morphToMany(PostProcess::class, 'processable');
+    }
+
+    public function failoverChannels(): BelongsToMany
+    {
+        return $this->belongsToMany(FailoverChannel::class, 'custom_playlist_failover_channel');
     }
 }

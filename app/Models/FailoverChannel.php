@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
+use App\Models\CustomPlaylist;
 
 class FailoverChannel extends Model
 {
@@ -27,5 +28,13 @@ class FailoverChannel extends Model
         return $this->belongsToMany(Channel::class, 'failover_channel_sources', 'failover_channel_id', 'channel_id')
                     ->withPivot('order') // Only 'order' remains
                     ->orderBy('failover_channel_sources.order', 'asc');
+    }
+
+    /**
+     * The custom playlists that this failover channel belongs to.
+     */
+    public function customPlaylists(): BelongsToMany
+    {
+        return $this->belongsToMany(CustomPlaylist::class, 'custom_playlist_failover_channel');
     }
 }

@@ -5,8 +5,11 @@ namespace App\Filament\Resources;
 use App\Filament\Resources\FailoverChannelResource\Pages;
 use App\Models\FailoverChannel;
 use App\Models\Channel; // Ensure Channel model is imported
+use App\Models\CustomPlaylist;
 use Filament\Forms;
 use Filament\Forms\Form;
+use Filament\Notifications\Notification;
+use Illuminate\Database\Eloquent\Collection;
 use Filament\Resources\Resource;
 use Filament\Tables;
 use Filament\Tables\Table;
@@ -136,6 +139,32 @@ class FailoverChannelResource extends Resource
             ])
             ->bulkActions([
                 Tables\Actions\BulkActionGroup::make([
+                    Tables\Actions\BulkAction::make('add_to_custom_playlist')
+                        ->label('Add to custom playlist')
+                        ->form([
+                            Forms\Components\Select::make('playlist')
+                                ->required()
+                                ->label('Custom Playlist')
+                                ->helperText('Select the custom playlist you would like to add the selected failover channel(s) to.')
+                                ->options(CustomPlaylist::where(['user_id' => auth()->id()])->get(['name', 'id'])->pluck('name', 'id'))
+                                ->searchable(),
+                        ])
+                        ->action(function (Collection $records, array $data): void {
+                            $playlist = CustomPlaylist::findOrFail($data['playlist']);
+                            $playlist->failoverChannels()->syncWithoutDetaching($records->pluck('id'));
+                        })->after(function () {
+                            Notification::make()
+                                ->success()
+                                ->title('Failover channels added to custom playlist')
+                                ->body('The selected failover channels have been added to the chosen custom playlist.')
+                                ->send();
+                        })
+                        ->deselectRecordsAfterCompletion()
+                        ->requiresConfirmation()
+                        ->icon('heroicon-o-plus-circle') // Changed icon to avoid conflict
+                        ->modalIcon('heroicon-o-plus-circle') // Changed icon to avoid conflict
+                        ->modalDescription('Add the selected failover channel(s) to the chosen custom playlist.')
+                        ->modalSubmitActionLabel('Add now'),
                     Tables\Actions\DeleteBulkAction::make(),
                 ]),
             ]);
