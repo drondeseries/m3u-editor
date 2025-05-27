@@ -5,9 +5,11 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use App\Models\CustomPlaylist;
+use Spatie\Tags\HasTags;
 
 class FailoverChannel extends Model
 {
+    use HasTags;
     protected $table = 'failover_channels';
 
     protected $fillable = [
