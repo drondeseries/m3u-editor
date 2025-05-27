@@ -47,16 +47,22 @@ class FailoverStreamController extends Controller
             // --- FFprobe Pre-check START ---
             Log::channel('ffmpeg')->info("[PRE-CHECK] Attempting ffprobe for source: {$currentStreamTitle} (URL: {$streamUrl})");
 
-            $ffmpegPathSetting = config('proxy.ffmpeg_path') ?: $settings['ffmpeg_path'];
-            if (empty($ffmpegPathSetting)) $ffmpegPathSetting = 'jellyfin-ffmpeg';
-
-            $ffprobePath = 'ffprobe'; // Default assumption
-            if ($ffmpegPathSetting === 'jellyfin-ffmpeg') {
-                $ffprobePath = 'jellyfin-ffprobe';
-            } elseif (str_contains($ffmpegPathSetting, '/')) {
-                $ffprobePath = dirname($ffmpegPathSetting) . '/ffprobe';
+            // Determine the command/path for ffmpeg execution first
+            $ffmpegCommandToExecute = config('proxy.ffmpeg_path') ?: $settings['ffmpeg_path'];
+            if (empty($ffmpegCommandToExecute)) {
+                $ffmpegCommandToExecute = 'jellyfin-ffmpeg'; // Default ffmpeg command
             }
-            // If $ffmpegPathSetting is just 'ffmpeg', $ffprobePath remains 'ffprobe' (relying on PATH)
+
+            // Now, derive the ffprobe path based on ffmpegCommandToExecute
+            if (str_contains($ffmpegCommandToExecute, '/')) {
+                // If $ffmpegCommandToExecute is a full path (e.g., /usr/bin/ffmpeg),
+                // assume ffprobe is in the same directory.
+                $ffprobePath = dirname($ffmpegCommandToExecute) . '/ffprobe';
+            } else {
+                // If $ffmpegCommandToExecute is just a command name (e.g., 'jellyfin-ffmpeg' or 'ffmpeg'),
+                // assume 'ffprobe' is the command for ffprobe and is in the system PATH.
+                $ffprobePath = 'ffprobe';
+            }
 
             $precheckCmd = $ffprobePath . " -v quiet -print_format json -show_streams -select_streams v:0 -user_agent " . escapeshellarg($currentStreamUserAgent) . " -multiple_requests 1 -reconnect_on_network_error 1 -reconnect_on_http_error 5xx,4xx -reconnect_streamed 1 -reconnect_delay_max 2 -timeout 5000000 " . escapeshellarg($streamUrl);
             Log::channel('ffmpeg')->info("[PRE-CHECK] Executing ffprobe command for [{$currentStreamTitle}]: {$precheckCmd}");
@@ -80,7 +86,7 @@ class FailoverStreamController extends Controller
             // Reset status for the main FFmpeg attempt, only if ffprobe passed
             $status = ['lowSpeedCount' => 0, 'processFailed' => false, 'clientAborted' => false];
             
-            $ffmpegPath = $ffmpegPathSetting; // Use the resolved path for the main ffmpeg command
+            $ffmpegPath = $ffmpegCommandToExecute; // Use the resolved command for the main ffmpeg execution
 
             $hwaccelInitArgs = '';
             $hwaccelArgs = '';
