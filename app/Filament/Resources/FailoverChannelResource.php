@@ -4,11 +4,13 @@ namespace App\Filament\Resources;
 
 use App\Filament\Resources\FailoverChannelResource\Pages;
 use App\Models\FailoverChannel;
+use App\Models\Channel; // Ensure Channel model is imported
 use Filament\Forms;
 use Filament\Forms\Form;
 use Filament\Resources\Resource;
 use Filament\Tables;
 use Filament\Tables\Table;
+use Illuminate\Support\Facades\Log; // Kept for now, can be removed in future if stable
 
 class FailoverChannelResource extends Resource
 {
@@ -49,7 +51,6 @@ class FailoverChannelResource extends Resource
                             ->options(function () {
                                 $customTitles = \App\Models\Channel::whereNotNull('title_custom')->pluck('title_custom', 'id');
                                 $defaultTitles = \App\Models\Channel::whereNull('title_custom')->pluck('title', 'id');
-                                // Merge, ensuring custom titles take precedence if IDs overlap (though IDs should be unique)
                                 return $customTitles->union($defaultTitles)->toArray();
                             })
                             ->searchable()
@@ -57,15 +58,28 @@ class FailoverChannelResource extends Resource
                             ->distinct()
                             ->disableOptionsWhenSelectedInSiblingRepeaterItems()
                             ->columnSpan('full'),
-                        // The 'order' field is handled by orderColumn on the Repeater itself.
                     ])
-                    ->orderColumn('order') // Enables drag-and-drop and handles 'order' pivot attribute.
+                    ->orderColumn('order')
                     ->columnSpan('full')
                     ->addActionLabel('Add Source Channel')
                     ->defaultItems(1)
                     ->reorderableWithButtons()
                     ->collapsible()
-                    ->collapsed(false),
+                    ->collapsed(false)
+                    ->saveRelationshipsUsing(function (FailoverChannel $record, array $state): void {
+                        $syncData = [];
+                        $currentOrder = 1; // Initialize order counter (1-indexed)
+                        
+                        // $state array keys might be UUIDs, but iteration order is preserved.
+                        foreach ($state as $itemKey => $itemData) { 
+                            Log::info('FailoverChannel Repeater Item (key ' . $itemKey . '): ' . json_encode($itemData));
+
+                            if (!empty($itemData['channel_id'])) {
+                                $syncData[$itemData['channel_id']] = ['order' => $currentOrder++];
+                            }
+                        }
+                        $record->sources()->sync($syncData);
+                    }),
             ]);
     }
 
