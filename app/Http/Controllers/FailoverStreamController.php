@@ -64,7 +64,7 @@ class FailoverStreamController extends Controller
                 $ffprobePath = 'ffprobe';
             }
 
-            $precheckCmd = $ffprobePath . " -v quiet -print_format json -show_streams -select_streams v:0 -user_agent " . escapeshellarg($currentStreamUserAgent) . " -multiple_requests 1 -reconnect_on_network_error 1 -reconnect_on_http_error 5xx,4xx -reconnect_streamed 1 -reconnect_delay_max 2 -timeout 5000000 " . escapeshellarg($streamUrl);
+            $precheckCmd = $ffprobePath . " -v quiet -print_format json -show_streams -select_streams v:0 -user_agent " . escapeshellarg($currentStreamUserAgent) . " -multiple_requests 1 -reconnect_on_network_error 1 -reconnect_on_http_error 5xx,4xx,509 -reconnect_streamed 1 -reconnect_delay_max 2 -timeout 5000000 " . escapeshellarg($streamUrl);
             Log::channel('ffmpeg')->info("[PRE-CHECK] Executing ffprobe command for [{$currentStreamTitle}]: {$precheckCmd}");
             
             $precheckProcess = SymfonyProcess::fromShellCommandline($precheckCmd);
@@ -118,7 +118,7 @@ class FailoverStreamController extends Controller
             $cmd .= $hwaccelArgs;
             $cmd .= "-user_agent ".$escapedUserAgent." -referer \"MyComputer\" " .
                     '-multiple_requests 1 -reconnect_on_network_error 1 ' .
-                    '-reconnect_on_http_error 5xx,4xx -reconnect_streamed 1 ' .
+                    '-reconnect_on_http_error 5xx,4xx,509 -reconnect_streamed 1 ' .
                     '-reconnect_delay_max 5';
             if (stripos($streamUrl, '.mkv') !== false) {
                 $cmd .= ' -analyzeduration 10M -probesize 10M';

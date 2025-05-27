@@ -136,7 +136,7 @@ class HlsStreamService
             // Pre-input HTTP options ($userAgent is already escaped from earlier logic):
             $cmd .= "-user_agent ".$userAgent." -referer \"MyComputer\" " .
                     '-multiple_requests 1 -reconnect_on_network_error 1 ' .
-                    '-reconnect_on_http_error 5xx,4xx -reconnect_streamed 1 ' .
+                    '-reconnect_on_http_error 5xx,4xx,509 -reconnect_streamed 1 ' .
                     '-reconnect_delay_max 5 -noautorotate ';
 
             $cmd .= $userArgs; 
