@@ -613,6 +613,7 @@ class PlaylistResource extends Resource
                         ->options(function ($record): array {
                             $groups = SourceGroup::where('playlist_id', $record->id)
                                 ->get()->pluck('name', 'name')->toArray();
+                            $options = []; // Initialize $options here
                             foreach ($groups as $option) {
                                 $options[$option] = $option;
                             }

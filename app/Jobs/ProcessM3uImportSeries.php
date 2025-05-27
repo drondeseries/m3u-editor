@@ -105,7 +105,6 @@ class ProcessM3uImportSeries implements ShouldQueue
                         'series_progress' => 100,
                         'processing' => false,
                     ]);
-                    
                     // Fire the playlist synced event
                     event(new SyncCompleted($playlist));
                 })->dispatch();
