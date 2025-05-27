@@ -79,9 +79,15 @@ class FailoverChannelResource extends Resource
                         Forms\Components\Select::make('channel_id')
                             ->label('Channel')
                             ->options(function () {
-                                $customTitles = \App\Models\Channel::whereNotNull('title_custom')->pluck('title_custom', 'id');
-                                $defaultTitles = \App\Models\Channel::whereNull('title_custom')->pluck('title', 'id');
-                                return $customTitles->union($defaultTitles)->toArray();
+                                $channels = \App\Models\Channel::with('playlist')
+                                                              ->whereHas('playlist') // Ensure channel has a playlist
+                                                              ->get();
+                                return $channels->mapWithKeys(function ($channel) {
+                                    $displayTitle = $channel->title_custom ?: $channel->title;
+                                    // Ensure playlist relationship is loaded and playlist name is accessible
+                                    $playlistName = $channel->playlist ? $channel->playlist->name : 'N/A';
+                                    return [$channel->id => "{$displayTitle} (Playlist: {$playlistName})"];
+                                })->toArray();
                             })
                             ->searchable()
                             ->required()
