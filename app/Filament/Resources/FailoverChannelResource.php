@@ -116,9 +116,23 @@ class FailoverChannelResource extends Resource
     {
         return $table
             ->columns([
+                Tables\Columns\ImageColumn::make('logo_display')
+                    ->label('Icon')
+                    ->checkFileExistence(false)
+                    ->height(40)
+                    ->toggleable(isToggledHiddenByDefault: false),
                 Tables\Columns\TextColumn::make('name')
                     ->searchable()
                     ->sortable(),
+                Tables\Columns\TextColumn::make('tvg_channel_number_display')
+                    ->label('TVG ChNo')
+                    ->sortable()
+                    ->toggleable(isToggledHiddenByDefault: false),
+                Tables\Columns\TextColumn::make('sources_count')
+                    ->label('Sources')
+                    ->counts('sources')
+                    ->sortable()
+                    ->toggleable(isToggledHiddenByDefault: false),
                 Tables\Columns\TextColumn::make('speed_threshold')
                     ->sortable(),
                 Tables\Columns\TextColumn::make('created_at')
