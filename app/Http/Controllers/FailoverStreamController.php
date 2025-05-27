@@ -8,7 +8,7 @@ use App\Settings\GeneralSettings;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Symfony\Component\HttpFoundation\StreamedResponse;
-use Symfony\Component\Process\Process as SymphonyProcess; // Alias for Symfony Process
+use Symfony\Component\Process\Process as SymfonyProcess; // Correctly aliased
 use Exception; // For catching exceptions
 use App\Exceptions\LowSpeedException; // Added for custom exception
 use Illuminate\Support\Facades\Redirect; // Added for HLS playlist redirect
@@ -33,16 +33,9 @@ class FailoverStreamController extends Controller
         Log::channel('ffmpeg')->info("Sources for {$failoverChannel->name}: " . $sources->map(function ($s) { return $s->name ?? $s->title ?? $s->id; })->toJson() . ". Speed threshold: {$failoverChannel->speed_threshold}x");
 
         $settings = $this->getStreamSettings();
-        // $userAgent is already escaped by escapeshellarg() in getStreamSettings if it's fetched from there,
-        // or here if we fetch it directly and escape.
-        // For consistency, let's ensure it's fetched and escaped before the loop.
-        $baseUserAgent = $settings['ffmpeg_user_agent']; // User agent from settings
+        $baseUserAgent = $settings['ffmpeg_user_agent']; 
 
         foreach ($sources as $sourceChannel) {
-            // Per-source user agent (if playlist specific) or fallback to general.
-            // $userAgent needs to be specific to this $sourceChannel if its playlist has one.
-            // This logic might need to be more sophisticated if playlist is not loaded on $sourceChannel by default.
-            // Assuming $sourceChannel->playlist is available if needed:
             $currentStreamUserAgent = $sourceChannel->playlist->user_agent ?? $baseUserAgent;
             $escapedUserAgent = escapeshellarg($currentStreamUserAgent);
 
@@ -57,12 +50,11 @@ class FailoverStreamController extends Controller
             $hwaccelInitArgs = '';
             $hwaccelArgs = '';
             $videoFilterArgs = '';
-            $codecSpecificArgs = ''; // Placeholder for future codec-specific args other than VA-API filter
+            $codecSpecificArgs = '';
 
-            $videoCodec = $sourceChannel->video_codec_custom ?? $settings['ffmpeg_codec_video']; // Use channel specific, then general, then default
+            $videoCodec = $sourceChannel->video_codec_custom ?? $settings['ffmpeg_codec_video'];
             $audioCodec = $sourceChannel->audio_codec_custom ?? $settings['ffmpeg_codec_audio'];
             $subtitleCodec = $sourceChannel->subtitle_codec_custom ?? $settings['ffmpeg_codec_subtitles'];
-
 
             if ($settings['ffmpeg_vaapi_enabled'] ?? false) {
                 $videoCodec = 'h264_vaapi';
@@ -100,8 +92,6 @@ class FailoverStreamController extends Controller
 
             Log::channel('ffmpeg')->info("Executing FFmpeg for source [{$currentStreamTitle}]: {$cmd}");
             
-            // Shared variable for low speed detection, reset for each source
-            // Needs to be an object or array to be modifiable by reference in the callback.
             $status = ['lowSpeedCount' => 0, 'processFailed' => false, 'clientAborted' => false];
 
             try {
@@ -111,6 +101,7 @@ class FailoverStreamController extends Controller
                     flush();
                     ini_set('zlib.output_compression', 0);
 
+                    // Use the aliased SymfonyProcess
                     $process = SymfonyProcess::fromShellCommandline($cmd);
                     $process->setTimeout(null);
 
@@ -121,12 +112,12 @@ class FailoverStreamController extends Controller
                             throw new Exception("CLIENT_ABORTED_FAILOVER"); 
                         }
 
-                        if ($type === SymfonyProcess::OUT) {
+                        if ($type === SymfonyProcess::OUT) { // Use aliased SymfonyProcess here too
                             echo $buffer;
                             flush();
                             usleep(10000); 
-                        } elseif ($type === SymfonyProcess::ERR) {
-                            $lines = preg_split('/\r?\n/', trim($buffer));
+                        } elseif ($type === SymfonyProcess::ERR) { // And here
+                            $lines = preg_split('/\r?\n/', trim($buffer)); // Corrected regex for preg_split
                             foreach ($lines as $line) {
                                 if (preg_match('/speed=\s*([0-9\.]+x)/', $line, $matches)) {
                                     $speedValue = rtrim($matches[1], 'x');
@@ -134,7 +125,7 @@ class FailoverStreamController extends Controller
                                     if ((float)$speedValue < (float)$failoverChannel->speed_threshold && (float)$speedValue > 0.0) {
                                         $status['lowSpeedCount']++;
                                         Log::channel('ffmpeg')->warning("Low speed count for [{$currentStreamTitle}]: {$status['lowSpeedCount']}");
-                                        if ($status['lowSpeedCount'] >= 3) { // Consecutive low speed readings
+                                        if ($status['lowSpeedCount'] >= 3) {
                                             Log::channel('ffmpeg')->error("Speed for [{$currentStreamTitle}] consistently below threshold ({$failoverChannel->speed_threshold}x). Triggering failover by exception.");
                                             throw new LowSpeedException("FFMPEG_SPEED_LOW_FAILOVER");
                                         }
@@ -149,7 +140,6 @@ class FailoverStreamController extends Controller
                     });
 
                     if (!$process->isSuccessful() && !$status['clientAborted'] && !($process->getExitCode() === null && $process->isRunning())) {
-                        // Process exited with an error, not due to client abort or speed low (which throws)
                         Log::channel('ffmpeg')->error("FFmpeg process for source [{$currentStreamTitle}] was not successful. Exit code: " . $process->getExitCode() . ". Output: " . $process->getErrorOutput());
                         $status['processFailed'] = true; 
                     }
@@ -163,36 +153,29 @@ class FailoverStreamController extends Controller
 
             } catch (LowSpeedException $e) {
                 Log::channel('ffmpeg')->info("Low speed detected for source [{$currentStreamTitle}]. Trying next source for Failover Channel [{$failoverChannel->name}].");
-                continue; // Try next source
+                continue; 
             } catch (Exception $e) {
                 if ($e->getMessage() === "CLIENT_ABORTED_FAILOVER") {
                     Log::channel('ffmpeg')->info("Client aborted during stream of [{$currentStreamTitle}] for Failover Channel [{$failoverChannel->name}]. Stopping failover attempts.");
-                    return response("Stream aborted by client.", 499); // Special code for client abort
+                    return response("Stream aborted by client.", 499); 
                 }
                 Log::channel('ffmpeg')->error("Error streaming source [{$currentStreamTitle}] for Failover Channel [{$failoverChannel->name}]: " . $e->getMessage());
-                if($status['processFailed']){ // If it was a process failure not caught by specific exceptions.
-                     // This check might be redundant if the process failing always throws an exception that gets here.
-                }
-                continue; // Try next source
+                continue; 
             }
         }
 
         Log::channel('ffmpeg')->error("All sources for Failover Channel {$failoverChannel->name} failed.");
-        return response("All sources failed or no suitable stream found.", 503); // Service Unavailable
+        return response("All sources failed or no suitable stream found.", 503); 
     }
     
-    /**
-     * Get all settings needed for streaming (copied from StreamController)
-     */
     protected function getStreamSettings(): array
     {
         $userPreferences = app(GeneralSettings::class);
-        // Initialize with defaults that match GeneralSettings defaults for these new fields
         $settings = [
             'ffmpeg_debug' => false,
             'ffmpeg_max_tries' => 3,
             'ffmpeg_user_agent' => 'VLC/3.0.21 LibVLC/3.0.21',
-            'ffmpeg_codec_video' => 'copy', // Default, will be overridden by VA-API if enabled
+            'ffmpeg_codec_video' => 'copy',
             'ffmpeg_codec_audio' => 'copy',
             'ffmpeg_codec_subtitles' => 'copy',
             'ffmpeg_path' => 'jellyfin-ffmpeg',
@@ -210,16 +193,13 @@ class FailoverStreamController extends Controller
                 'ffmpeg_codec_audio' => $userPreferences->ffmpeg_codec_audio ?? $settings['ffmpeg_codec_audio'],
                 'ffmpeg_codec_subtitles' => $userPreferences->ffmpeg_codec_subtitles ?? $settings['ffmpeg_codec_subtitles'],
                 'ffmpeg_path' => $userPreferences->ffmpeg_path ?? $settings['ffmpeg_path'],
-                
                 'ffmpeg_vaapi_enabled' => $userPreferences->ffmpeg_vaapi_enabled ?? $settings['ffmpeg_vaapi_enabled'],
                 'ffmpeg_vaapi_device' => $userPreferences->ffmpeg_vaapi_device ?? $settings['ffmpeg_vaapi_device'],
                 'ffmpeg_vaapi_video_filter' => $userPreferences->ffmpeg_vaapi_video_filter ?? $settings['ffmpeg_vaapi_video_filter'],
             ];
-
             $settings['ffmpeg_additional_args'] = config('proxy.ffmpeg_additional_args', '');
         } catch (Exception $e) {
             Log::error("Error fetching stream settings: " . $e->getMessage());
-            // Keep default settings if UserPreferences fail
         }
         return $settings;
     }
@@ -227,10 +207,8 @@ class FailoverStreamController extends Controller
     public function serveHlsPlaylist(Request $request, FailoverChannel $failoverChannel)
     {
         Log::channel('ffmpeg')->info("HLS playlist requested for Failover Channel: {$failoverChannel->name} (ID: {$failoverChannel->id})");
-
-        // Get the first enabled source channel, ordered by the 'order' column in the pivot table
         $primarySource = $failoverChannel->sources()
-                                       ->where('channels.enabled', true) // Ensure the channel itself is enabled
+                                       ->where('channels.enabled', true) 
                                        ->first();
 
         if (!$primarySource) {
@@ -239,21 +217,9 @@ class FailoverStreamController extends Controller
         }
 
         Log::channel('ffmpeg')->info("Using source channel '{$primarySource->name}' (ID: {$primarySource->id}) for HLS playlist for Failover Channel '{$failoverChannel->name}'.");
-
-        // Construct the URL to the HLS playlist of the chosen source channel.
-        // This assumes that HLS streams for individual channels are served at a path like /hls/{channel_id}/stream.m3u8
-        // This path is typically handled by Nginx X-Accel-Redirect or similar, pointing to where HlsStreamService stores the files.
-        // The HlsStreamService itself uses Storage::disk('app')->path("hls/{$id}") for channels.
-        // The public URL might be different based on how HLS segments are served (e.g., directly by PHP or via Nginx).
-        // For now, we'll construct a common pattern. If this specific URL doesn't work,
-        // it indicates the need to look at how HLS URLs are made public for individual channels.
         
-        // The HLS segments are typically served via HlsStreamController.php which handles /hls/{type}/{id}/{segment}
-        // The playlist itself is also served by HlsStreamController.php at /hls/{type}/{id}/stream.m3u8
-        // So, we need to ensure 'type' is correctly identified. For a Channel source, type is 'channel'.
-        // Assuming the route 'hls.playlist' exists and is correctly defined.
         $targetHlsPlaylistUrl = route('hls.playlist', [
-            'type' => 'channel', // Since the source is a Channel model
+            'type' => 'channel', 
             'id' => $primarySource->id
         ]);
 

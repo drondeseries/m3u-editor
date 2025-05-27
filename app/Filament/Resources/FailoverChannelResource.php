@@ -42,6 +42,33 @@ class FailoverChannelResource extends Resource
                     ->default(0.9)
                     ->helperText('If stream speed (e.g., 0.8x) falls below this, try next source.')
                     ->columnSpan('full'),
+                Forms\Components\Section::make('TVG Overrides (Optional)')
+                    ->description('Define specific TVG attributes for this Failover Channel entry in M3U/EPG outputs. If blank, attributes from the primary source channel may be used.')
+                    ->collapsible()
+                    ->collapsed() // Or false, as preferred
+                    ->schema([
+                        Forms\Components\TextInput::make('tvg_name_override')
+                            ->label('TVG Name Override')
+                            ->placeholder('e.g., My Custom Failover Name')
+                            ->columnSpan('full'),
+                        Forms\Components\TextInput::make('tvg_logo_override')
+                            ->label('TVG Logo URL Override')
+                            ->type('url')
+                            ->placeholder('e.g., http://example.com/logo.png')
+                            ->columnSpan('full'),
+                        Forms\Components\TextInput::make('tvg_id_override')
+                            ->label('TVG ID Override (XMLTV ID)')
+                            ->placeholder('e.g., myfailover.tvg.id')
+                            ->columnSpan('full'),
+                        Forms\Components\TextInput::make('tvg_chno_override')
+                            ->label('TVG Channel Number Override (tvg-chno)')
+                            ->placeholder('e.g., 1001')
+                            ->columnSpan('full'),
+                        Forms\Components\TextInput::make('tvg_guide_stationid_override')
+                            ->label('TVG Guide Station ID Override')
+                            ->placeholder('e.g., 12345')
+                            ->columnSpan('full'),
+                    ])->columnSpan('full'),
                 Forms\Components\Repeater::make('sources')
                     ->label('Source Channels (in order of failover)')
                     ->relationship()
@@ -58,26 +85,6 @@ class FailoverChannelResource extends Resource
                             ->distinct()
                             ->disableOptionsWhenSelectedInSiblingRepeaterItems()
                             ->columnSpan('full'),
-                        Forms\Components\TextInput::make('override_tvg_name')
-                            ->label('Override TVG Name')
-                            ->placeholder('Enter if overriding original channel name')
-                            ->columnSpan('full'),
-                        Forms\Components\TextInput::make('override_tvg_logo')
-                            ->label('Override TVG Logo URL')
-                            ->placeholder('Enter if overriding original channel logo')
-                            ->columnSpan('full'),
-                        Forms\Components\TextInput::make('override_tvg_id')
-                            ->label('Override TVG ID (XMLTV ID)')
-                            ->placeholder('Enter if overriding original channel XMLTV ID')
-                            ->columnSpan('full'),
-                        Forms\Components\TextInput::make('override_tvg_chno')
-                            ->label('Override TVG Channel Number (tvg-chno)')
-                            ->placeholder('Enter if overriding original channel number display in EPG')
-                            ->columnSpan('full'),
-                        Forms\Components\TextInput::make('override_tvg_guide_stationid')
-                            ->label('Override TVG Guide Station ID')
-                            ->placeholder('Enter if overriding original guide station ID')
-                            ->columnSpan('full'),
                     ])
                     ->orderColumn('order')
                     ->columnSpan('full')
@@ -91,18 +98,10 @@ class FailoverChannelResource extends Resource
                         $currentOrder = 1; // Initialize order counter (1-indexed)
                         
                         // $state array keys might be UUIDs, but iteration order is preserved.
-                        foreach ($state as $itemKey => $itemData) {
-                            Log::info('FailoverChannel Repeater Item (key ' . $itemKey . '): ' . json_encode($itemData));
-
+                        foreach ($state as $itemKey => $itemData) { 
+                            // Log::info('FailoverChannel Repeater Item (key ' . $itemKey . '): ' . json_encode($itemData)); // Still useful for one more test
                             if (!empty($itemData['channel_id'])) {
-                                $syncData[$itemData['channel_id']] = [
-                                    'order' => $currentOrder++,
-                                    'override_tvg_name' => $itemData['override_tvg_name'] ?? null,
-                                    'override_tvg_logo' => $itemData['override_tvg_logo'] ?? null,
-                                    'override_tvg_id' => $itemData['override_tvg_id'] ?? null,
-                                    'override_tvg_chno' => $itemData['override_tvg_chno'] ?? null,
-                                    'override_tvg_guide_stationid' => $itemData['override_tvg_guide_stationid'] ?? null,
-                                ];
+                                $syncData[$itemData['channel_id']] = ['order' => $currentOrder++];
                             }
                         }
                         $record->sources()->sync($syncData);

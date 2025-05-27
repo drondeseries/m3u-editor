@@ -7,92 +7,95 @@ use App\Models\Channel; // Might be needed for type hinting or constants
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Response; // For streaming response
 use Illuminate\Support\Str; // For Str::slug
-use App\Enums\ChannelLogoType;
+use App\Enums\ChannelLogoType; // Ensure this is present
 
 // TODO: Import other necessary classes like PlaylistChannelId, ProxyFacade if needed later.
 
 class FailoverChannelM3uController extends Controller
 {
-    // Define constants for pivot columns to avoid magic strings
+    // PIVOT_COLUMNS constant is no longer strictly needed for TVG overrides by this method,
+    // but might be used by other methods or if pivot data for 'order' is ever explicitly fetched.
+    // For now, it can remain as it doesn't harm.
     private const PIVOT_COLUMNS = [
         'order',
-        'override_tvg_id',
-        'override_tvg_logo',
-        'override_tvg_name',
-        'override_tvg_chno',
-        'override_tvg_guide_stationid'
+        // 'override_tvg_id', // Removed as example, these are no longer from pivot
+        // 'override_tvg_logo',
+        // 'override_tvg_name',
+        // 'override_tvg_chno',
+        // 'override_tvg_guide_stationid'
     ];
 
     public function generate(Request $request, FailoverChannel $failoverChannel)
     {
-        // Ensure necessary models are imported at the top of the file:
-        // use App\Models\Channel;
-        // use App\Enums\ChannelLogoType; // If used for logo fallback logic
-        // use App\Enums\PlaylistChannelId; // If used for tvg-id fallback logic (though less direct here)
-        // use App\Facades\ProxyFacade; // If proxy logic is ever integrated here
-
+        // Fetch primary source to use for fallbacks if overrides are not set
+        // and for other attributes like catchup, timeshift, original group.
         $primarySource = $failoverChannel->sources()
-            ->withPivot(self::PIVOT_COLUMNS) // PIVOT_COLUMNS is already defined in the class
+            // No longer need ->withPivot(self::PIVOT_COLUMNS) for TVG overrides from pivot
             ->wherePivot('order', 1)
             ->first();
 
         if (!$primarySource) {
-            // No primary source, return empty M3U or minimal error entry
+            // No primary source, M3U entry needs to reflect this or be minimal.
+            // Use FailoverChannel's own overrides if they exist, or sensible defaults.
             $m3uContent = "#EXTM3U\n";
-            $m3uContent .= "#EXTINF:-1 tvg-name=\"{$failoverChannel->name} (No Source)\",No Source Available\n";
-            $m3uContent .= "http://error.invalid/no_source_for_failover_{$failoverChannel->id}\n";
+            $tvgNameDisplay = $failoverChannel->tvg_name_override ?: $failoverChannel->name;
+            // Ensure tvg_id_override is processed by the regex if it exists.
+            $tvgIdDisplay = $failoverChannel->tvg_id_override;
+            if (empty($tvgIdDisplay)) { // If no override, generate from name
+                $tvgIdDisplay = Str::slug($failoverChannel->name, '.');
+            }
+            $tvgIdDisplay = preg_replace(config('dev.tvgid.regex', '/[^A-Za-z0-9.-]/'), '', $tvgIdDisplay);
+            
+            $extinfTitle = $tvgNameDisplay ?: 'Unnamed Failover';
+
+            $extInfLine = "#EXTINF:-1";
+            if (!empty($tvgIdDisplay)) $extInfLine .= " tvg-id=\"{$tvgIdDisplay}\"";
+            if (!empty($tvgNameDisplay)) $extInfLine .= " tvg-name=\"{$tvgNameDisplay}\"";
+            // Add other direct TVG overrides from $failoverChannel if they exist
+            if (!empty($failoverChannel->tvg_logo_override)) $extInfLine .= " tvg-logo=\"{$failoverChannel->tvg_logo_override}\"";
+            if (!empty($failoverChannel->tvg_chno_override)) $extInfLine .= " tvg-chno=\"{$failoverChannel->tvg_chno_override}\"";
+            // tvg_guide_stationid_override is not directly used in M3U EXTINF but good to have if needed for other contexts.
+            // if (!empty($failoverChannel->tvg_guide_stationid_override)) $extInfLine .= " tvg-guide-stationid=\"{$failoverChannel->tvg_guide_stationid_override}\"";
+            $extInfLine .= ",{$extinfTitle}";
+
+            $m3uContent .= $extInfLine . "\n";
+            // Stream URL still points to the FailoverStreamController
+            $m3uContent .= route('stream.failover', ['failoverChannel' => $failoverChannel->id]) . "\n";
             
             $filename = Str::slug($failoverChannel->name ?: 'failover-no-source') . '.m3u';
-            return Response::make($m3uContent, 404, [
+            return Response::make($m3uContent, 200, [ // Return 200 but with minimal info
                 'Access-Control-Allow-Origin' => '*',
                 'Content-Disposition' => "attachment; filename=\"{$filename}\"",
                 'Content-Type' => 'application/vnd.apple.mpegurl',
             ]);
         }
 
-        // Determine TVG attributes using overrides first, then fallbacks from the Channel model
-        $pivotData = $primarySource->pivot;
-
-        // TVG Name
-        $tvgName = $pivotData->override_tvg_name ?: ($primarySource->name_custom ?: $primarySource->name);
-
-        // TVG Logo
-        // For logo, if no override, use existing channel logic (which might check epgChannel, logo_type)
-        $tvgLogo = $pivotData->override_tvg_logo;
-        if (empty($tvgLogo)) {
+        // All TVG attributes are now primarily from $failoverChannel itself
+        $tvgName = $failoverChannel->tvg_name_override ?: ($primarySource->name_custom ?: $primarySource->name);
+        
+        $tvgLogo = $failoverChannel->tvg_logo_override;
+        if (empty($tvgLogo)) { // Fallback for logo if override is empty
             if ($primarySource->logo_type === \App\Enums\ChannelLogoType::Epg && $primarySource->epgChannel) {
                 $tvgLogo = $primarySource->epgChannel->icon ?? '';
             } elseif ($primarySource->logo_type === \App\Enums\ChannelLogoType::Channel) {
                 $tvgLogo = $primarySource->logo ?? '';
             }
             if (empty($tvgLogo)) {
-                // Assuming a global helper 'url()' is available, or adjust as needed
-                $tvgLogo = url('/placeholder.png'); 
+                // Ensure url() helper is available or use a fully qualified URL for placeholder.
+                // For safety, using a generic placeholder path if url() isn't guaranteed in this context.
+                $tvgLogo = '/placeholder.png'; // Or config('app.url').'/placeholder.png';
             }
         }
         
-        // TVG ID (XMLTV ID)
-        $tvgId = $pivotData->override_tvg_id ?: ($primarySource->stream_id_custom ?: $primarySource->stream_id);
-        // Ensure TVG ID is clean (using the app's existing config for regex)
+        $tvgId = $failoverChannel->tvg_id_override ?: ($primarySource->stream_id_custom ?: $primarySource->stream_id);
         $tvgId = preg_replace(config('dev.tvgid.regex', '/[^A-Za-z0-9.-]/'), '', $tvgId);
 
+        $tvgChno = $failoverChannel->tvg_chno_override ?: $primarySource->channel;
 
-        // TVG Channel Number (tvg-chno)
-        // The 'channel' field on the Channel model holds its number.
-        // The override 'override_tvg_chno' is a string, can be used directly.
-        $tvgChno = $pivotData->override_tvg_chno ?: $primarySource->channel;
-        if ($tvgChno === null || $tvgChno === '') { // If original channel number is also null/empty
-            // Decide on a fallback for tvg-chno if it's critical. 
-            // Could use primarySource->id or leave empty if allowed by player.
-            // For now, leave potentially empty if both override and original are empty.
-        }
-
-        // Title for the M3U line (usually a display name)
-        // Often same as tvg-name, but can be different. Let's use tvg-name for simplicity here.
+        // Title for the M3U line
         $extinfTitle = $tvgName;
 
-        // Stream URL should point to the FailoverStreamController route
-        // The route name is 'stream.failover'
+        // Stream URL points to the FailoverStreamController route
         $streamUrl = route('stream.failover', ['failoverChannel' => $failoverChannel->id]);
 
         // Construct #EXTINF line
@@ -101,11 +104,12 @@ class FailoverChannelM3uController extends Controller
         if (!empty($tvgName)) $extInfLine .= " tvg-name=\"{$tvgName}\"";
         if (!empty($tvgLogo)) $extInfLine .= " tvg-logo=\"{$tvgLogo}\"";
         if ($tvgChno !== null && $tvgChno !== '') $extInfLine .= " tvg-chno=\"{$tvgChno}\"";
-        // Note: tvg-guide-stationid is not a standard M3U tag in EXTINF, it's for XMLTV.
-        // We can add other original channel attributes if needed, e.g., group-title
+        
+        // Original group from primary source (overrides don't apply to group-title in this design)
         $originalGroup = $primarySource->group_internal ?: $primarySource->group;
         if (!empty($originalGroup)) $extInfLine .= " group-title=\"{$originalGroup}\"";
-        // Add timeshift, catchup from primary source if they exist (no overrides for these planned)
+        
+        // Catchup and timeshift from primary source (no overrides for these)
         if ($primarySource->shift) $extInfLine .= " timeshift=\"{$primarySource->shift}\"";
         if ($primarySource->catchup) $extInfLine .= " catchup=\"{$primarySource->catchup}\"";
         if ($primarySource->catchup_source) $extInfLine .= " catchup-source=\"{$primarySource->catchup_source}\"";

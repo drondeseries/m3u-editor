@@ -12,6 +12,11 @@ class FailoverChannel extends Model
     protected $fillable = [
         'name',
         'speed_threshold',
+        'tvg_id_override',
+        'tvg_logo_override',
+        'tvg_name_override',
+        'tvg_chno_override',
+        'tvg_guide_stationid_override',
     ];
 
     /**
@@ -20,14 +25,7 @@ class FailoverChannel extends Model
     public function sources(): BelongsToMany
     {
         return $this->belongsToMany(Channel::class, 'failover_channel_sources', 'failover_channel_id', 'channel_id')
-                ->withPivot([
-                    'order',
-                    'override_tvg_id',
-                    'override_tvg_logo',
-                    'override_tvg_name',
-                    'override_tvg_chno',
-                    'override_tvg_guide_stationid'
-                ])
+                    ->withPivot('order') // Only 'order' remains
                     ->orderBy('failover_channel_sources.order', 'asc');
     }
 }
