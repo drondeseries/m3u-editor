@@ -388,64 +388,120 @@ class PlaylistGenerateController extends Controller
             $playlist = CustomPlaylist::where('uuid', $uuid)->firstOrFail();
         }
 
-        // Get all active channels
-        $channels = $playlist->channels()
-            ->where('enabled', true)
-            ->orderBy('sort')
-            ->orderBy('channel')
-            ->orderBy('title')
-            ->get();
-
         // Check if proxy enabled
         $proxyEnabled = $playlist->enable_proxy;
         $idChannelBy = $playlist->id_channel_by;
         $autoIncrement = $playlist->auto_channel_increment;
         $channelNumber = $autoIncrement ? $playlist->channel_start - 1 : 0;
-        return response()->json($channels->transform(function (Channel $channel) use ($proxyEnabled, $idChannelBy, $autoIncrement, &$channelNumber) {
-            $url = $channel->url_custom ?? $channel->url;
-            if ($proxyEnabled) {
-                $url = ProxyFacade::getProxyUrlForChannel(
-                    id: $channel->id,
-                    format: 'ts'
-                );
+
+        $isCustomPlaylist = $playlist instanceof \App\Models\CustomPlaylist;
+        $processedItems = collect([]); 
+
+        if ($isCustomPlaylist) {
+            $regularChannels = $playlist->channels()
+                ->where('enabled', true)
+                ->orderBy('sort')
+                ->orderBy('channel')
+                ->orderBy('title')
+                ->get();
+
+            $failoverChannels = $playlist->failoverChannels()
+                ->with(['sources' => function ($query) {
+                    $query->orderBy('failover_channel_sources.order', 'asc');
+                }])
+                ->get();
+
+            foreach ($regularChannels as $regChannel) {
+                $processedItems->push(['is_failover' => false, 'model' => $regChannel]);
             }
-            $channelNo = $channel->channel;
-            if (!$channelNo && $autoIncrement) {
-                $channelNo = ++$channelNumber;
+            foreach ($failoverChannels as $fc) {
+                $processedItems->push(['is_failover' => true, 'model' => $fc]);
             }
-            // Get the TVG ID
-            switch ($idChannelBy) {
-                case PlaylistChannelId::ChannelId:
-                    $tvgId = $channelNo;
-                    break;
-                case PlaylistChannelId::Name:
-                    $tvgId = $channel->name_custom ?? $channel->name;
-                    break;
-                case PlaylistChannelId::Title:
-                    $tvgId = $channel->title_custom ?? $channel->title;
-                    break;
-                default:
-                    $tvgId = $channel->stream_id_custom ?? $channel->stream_id;
-                    break;
+        } else {
+            // For non-custom playlists, also wrap channels for consistent transformation logic
+            $originalChannels = $playlist->channels()
+                ->where('enabled', true)
+                ->orderBy('sort')
+                ->orderBy('channel')
+                ->orderBy('title')
+                ->get();
+            foreach ($originalChannels as $origChannel) {
+                $processedItems->push(['is_failover' => false, 'model' => $origChannel]);
             }
+        }
+
+        return response()->json($processedItems->transform(function ($item) use ($proxyEnabled, $idChannelBy, $autoIncrement, &$channelNumber) {
+            $model = $item['model'];
+            $isFailoverItem = $item['is_failover'];
+
+            $url = '';
+            $tvgId = '';
+            $guideName = '';
+            $channelNo = null; 
+
+            if ($isFailoverItem) {
+                $primarySource = $model->sources->first();
+                $url = route('stream.failover', ['failoverChannel' => $model->id]);
+                $guideName = $model->tvg_name_override ?: ($primarySource ? ($primarySource->title_custom ?: $primarySource->title) : $model->name);
+                $channelNo = $model->tvg_chno_override ?: ($primarySource ? $primarySource->channel : null);
+
+                if ($idChannelBy === \App\Enums\PlaylistChannelId::ChannelId) {
+                    $tvgId = $channelNo; 
+                } else {
+                    $tempTvgId = $model->tvg_id_override ?: ($primarySource ? ($primarySource->stream_id_custom ?: $primarySource->stream_id) : '');
+                    $tvgId = preg_replace(config('dev.tvgid.regex', '/[^A-Za-z0-9.-]/'), '', $tempTvgId);
+                }
+                 // Failover channel numbers are not part of auto-increment sequence in this context for TVG ID.
+            } else { // Regular Channel (whether in a CustomPlaylist or other playlist types)
+                $url = $model->url_custom ?? $model->url;
+                if ($proxyEnabled) {
+                    $url = ProxyFacade::getProxyUrlForChannel(id: $model->id, format: 'ts');
+                }
+                $guideName = $model->title_custom ?? $model->title;
+                $channelNo = $model->channel; 
+
+                if (!$channelNo && $autoIncrement) { 
+                    $channelNo = ++$channelNumber; // Auto-increment only for regular channels
+                }
+
+                switch ($idChannelBy) {
+                    case \App\Enums\PlaylistChannelId::ChannelId:
+                        $tvgId = $channelNo;
+                        break;
+                    case \App\Enums\PlaylistChannelId::Name:
+                        $tvgId = $model->name_custom ?? $model->name;
+                        break;
+                    case \App\Enums\PlaylistChannelId::Title:
+                        $tvgId = $model->title_custom ?? $model->title;
+                        break;
+                    default: // StreamId
+                        $tvgId = $model->stream_id_custom ?? $model->stream_id;
+                        break;
+                }
+                
+                if ($idChannelBy !== \App\Enums\PlaylistChannelId::ChannelId) {
+                     $tvgId = preg_replace(config('dev.tvgid.regex', '/[^A-Za-z0-9.-]/'), '', (string)$tvgId);
+                }
+            }
+            
+            // Fallback for tvgId if it's empty or null. HDHR requires a GuideNumber.
+            // Ensure $tvgId is not just empty, but also not "0" before applying fallback.
+            if ( (empty($tvgId) && $tvgId !== '0') ) { 
+                if ($channelNo !== null) { // Use determined $channelNo (from model, override, or auto-increment)
+                    $tvgId = (string)$channelNo;
+                } else {
+                    // Last resort: generate a unique-ish ID.
+                    $prefix = $isFailoverItem ? "fc" : "ch";
+                    // Ensure model ID is part of the hash input for more robust uniqueness
+                    $tvgId = $prefix . "_" . $model->id . "_" . Str::substr(md5($guideName . $url . $model->id), 0, 6); 
+                }
+            }
+            
             return [
-                'GuideNumber' => (string)$tvgId,
-                'GuideName' => $channel->title_custom ?? $channel->title,
+                'GuideNumber' => (string)$tvgId, 
+                'GuideName' => $guideName,
                 'URL' => $url,
             ];
-
-            // Example of more detailed response
-            //            return [
-            //                'GuideNumber' => $channel->channel_number ?? $streamId, // Channel number (e.g., "100")
-            //                'GuideName'   => $channel->title_custom ?? $channel->title, // Channel name
-            //                'URL'         => $url, // Stream URL
-            //                'HD'          => $is_hd ? 1 : 0, // HD flag
-            //                'VideoCodec'  => 'H264', // Set based on your stream format
-            //                'AudioCodec'  => 'AAC', // Set based on your stream format
-            //                'Favorite'    => $favorite ? 1 : 0, // Favorite flag
-            //                'DRM'         => 0, // Assuming no DRM
-            //                'Streaming'   => 'direct', // Direct stream or transcoding
-            //            ];
         }));
     }
 

@@ -138,6 +138,7 @@ class CustomPlaylistResource extends Resource
     {
         return [
             RelationManagers\ChannelsRelationManager::class,
+            RelationManagers\FailoverChannelsRelationManager::class, // Add this line
             RelationManagers\TagsRelationManager::class,
         ];
     }
