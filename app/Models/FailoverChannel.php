@@ -20,7 +20,14 @@ class FailoverChannel extends Model
     public function sources(): BelongsToMany
     {
         return $this->belongsToMany(Channel::class, 'failover_channel_sources', 'failover_channel_id', 'channel_id')
-                    ->withPivot('order')
+                ->withPivot([
+                    'order',
+                    'override_tvg_id',
+                    'override_tvg_logo',
+                    'override_tvg_name',
+                    'override_tvg_chno',
+                    'override_tvg_guide_stationid'
+                ])
                     ->orderBy('failover_channel_sources.order', 'asc');
     }
 }

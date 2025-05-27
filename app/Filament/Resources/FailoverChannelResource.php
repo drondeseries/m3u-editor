@@ -58,6 +58,26 @@ class FailoverChannelResource extends Resource
                             ->distinct()
                             ->disableOptionsWhenSelectedInSiblingRepeaterItems()
                             ->columnSpan('full'),
+                        Forms\Components\TextInput::make('override_tvg_name')
+                            ->label('Override TVG Name')
+                            ->placeholder('Enter if overriding original channel name')
+                            ->columnSpan('full'),
+                        Forms\Components\TextInput::make('override_tvg_logo')
+                            ->label('Override TVG Logo URL')
+                            ->placeholder('Enter if overriding original channel logo')
+                            ->columnSpan('full'),
+                        Forms\Components\TextInput::make('override_tvg_id')
+                            ->label('Override TVG ID (XMLTV ID)')
+                            ->placeholder('Enter if overriding original channel XMLTV ID')
+                            ->columnSpan('full'),
+                        Forms\Components\TextInput::make('override_tvg_chno')
+                            ->label('Override TVG Channel Number (tvg-chno)')
+                            ->placeholder('Enter if overriding original channel number display in EPG')
+                            ->columnSpan('full'),
+                        Forms\Components\TextInput::make('override_tvg_guide_stationid')
+                            ->label('Override TVG Guide Station ID')
+                            ->placeholder('Enter if overriding original guide station ID')
+                            ->columnSpan('full'),
                     ])
                     ->orderColumn('order')
                     ->columnSpan('full')
@@ -71,11 +91,18 @@ class FailoverChannelResource extends Resource
                         $currentOrder = 1; // Initialize order counter (1-indexed)
                         
                         // $state array keys might be UUIDs, but iteration order is preserved.
-                        foreach ($state as $itemKey => $itemData) { 
+                        foreach ($state as $itemKey => $itemData) {
                             Log::info('FailoverChannel Repeater Item (key ' . $itemKey . '): ' . json_encode($itemData));
 
                             if (!empty($itemData['channel_id'])) {
-                                $syncData[$itemData['channel_id']] = ['order' => $currentOrder++];
+                                $syncData[$itemData['channel_id']] = [
+                                    'order' => $currentOrder++,
+                                    'override_tvg_name' => $itemData['override_tvg_name'] ?? null,
+                                    'override_tvg_logo' => $itemData['override_tvg_logo'] ?? null,
+                                    'override_tvg_id' => $itemData['override_tvg_id'] ?? null,
+                                    'override_tvg_chno' => $itemData['override_tvg_chno'] ?? null,
+                                    'override_tvg_guide_stationid' => $itemData['override_tvg_guide_stationid'] ?? null,
+                                ];
                             }
                         }
                         $record->sources()->sync($syncData);

@@ -13,6 +13,8 @@ use Illuminate\Support\Facades\Route;
 Route::get('/{uuid}/playlist.m3u', PlaylistGenerateController::class)
     ->name('playlist.generate');
 
+Route::get('/m3u/failover/{failoverChannel:uuid}.m3u', [App\Http\Controllers\FailoverChannelM3uController::class, 'generate'])->name('failover_channel.m3u');
+
 Route::get('/{uuid}/hdhr/device.xml', [\App\Http\Controllers\PlaylistGenerateController::class, 'hdhr'])
     ->name('playlist.hdhr');
 Route::get('/{uuid}/hdhr', [\App\Http\Controllers\PlaylistGenerateController::class, 'hdhrOverview'])
