@@ -44,8 +44,43 @@ class FailoverStreamController extends Controller
             $streamUrl = $sourceChannel->url_custom ?? $sourceChannel->url;
             $currentStreamTitle = strip_tags($sourceChannel->title_custom ?? $sourceChannel->title ?? $sourceChannel->name ?? "Source {$sourceChannel->id}");
             
-            $ffmpegPath = config('proxy.ffmpeg_path') ?: $settings['ffmpeg_path'];
-            if (empty($ffmpegPath)) $ffmpegPath = 'jellyfin-ffmpeg';
+            // --- FFprobe Pre-check START ---
+            Log::channel('ffmpeg')->info("[PRE-CHECK] Attempting ffprobe for source: {$currentStreamTitle} (URL: {$streamUrl})");
+
+            $ffmpegPathSetting = config('proxy.ffmpeg_path') ?: $settings['ffmpeg_path'];
+            if (empty($ffmpegPathSetting)) $ffmpegPathSetting = 'jellyfin-ffmpeg';
+
+            $ffprobePath = 'ffprobe'; // Default assumption
+            if ($ffmpegPathSetting === 'jellyfin-ffmpeg') {
+                $ffprobePath = 'jellyfin-ffprobe';
+            } elseif (str_contains($ffmpegPathSetting, '/')) {
+                $ffprobePath = dirname($ffmpegPathSetting) . '/ffprobe';
+            }
+            // If $ffmpegPathSetting is just 'ffmpeg', $ffprobePath remains 'ffprobe' (relying on PATH)
+
+            $precheckCmd = $ffprobePath . " -v quiet -print_format json -show_streams -select_streams v:0 -user_agent " . escapeshellarg($currentStreamUserAgent) . " -multiple_requests 1 -reconnect_on_network_error 1 -reconnect_on_http_error 5xx,4xx -reconnect_streamed 1 -reconnect_delay_max 2 -timeout 5000000 " . escapeshellarg($streamUrl);
+            Log::channel('ffmpeg')->info("[PRE-CHECK] Executing ffprobe command for [{$currentStreamTitle}]: {$precheckCmd}");
+            
+            $precheckProcess = SymfonyProcess::fromShellCommandline($precheckCmd);
+            $precheckProcess->setTimeout(7); // 7-second timeout for ffprobe
+
+            try {
+                $precheckProcess->run();
+                if (!$precheckProcess->isSuccessful()) {
+                    Log::channel('ffmpeg')->error("[PRE-CHECK] ffprobe failed for source [{$currentStreamTitle}]. Exit Code: " . $precheckProcess->getExitCode() . ". Error Output: " . $precheckProcess->getErrorOutput());
+                    continue; // Try next source
+                }
+                Log::channel('ffmpeg')->info("[PRE-CHECK] ffprobe successful for source [{$currentStreamTitle}].");
+            } catch (Exception $e) { // Catches ProcessTimedOutException, ProcessFailedException etc. from run()
+                Log::channel('ffmpeg')->error("[PRE-CHECK] ffprobe exception for source [{$currentStreamTitle}]: " . $e->getMessage());
+                continue; // Try next source
+            }
+            // --- FFprobe Pre-check END ---
+
+            // Reset status for the main FFmpeg attempt, only if ffprobe passed
+            $status = ['lowSpeedCount' => 0, 'processFailed' => false, 'clientAborted' => false];
+            
+            $ffmpegPath = $ffmpegPathSetting; // Use the resolved path for the main ffmpeg command
 
             $hwaccelInitArgs = '';
             $hwaccelArgs = '';
@@ -92,7 +127,7 @@ class FailoverStreamController extends Controller
 
             Log::channel('ffmpeg')->info("Executing FFmpeg for source [{$currentStreamTitle}]: {$cmd}");
             
-            $status = ['lowSpeedCount' => 0, 'processFailed' => false, 'clientAborted' => false];
+            // $status is now reset before this try block thanks to the pre-check logic above
 
             try {
                 return new StreamedResponse(function () use ($cmd, $currentStreamTitle, $failoverChannel, &$status) {
