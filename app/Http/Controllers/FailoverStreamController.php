@@ -12,9 +12,19 @@ use Symfony\Component\Process\Process as SymfonyProcess; // Correctly aliased
 use Exception; // For catching exceptions
 use App\Exceptions\LowSpeedException; // Added for custom exception
 use Illuminate\Support\Facades\Redirect; // Added for HLS playlist redirect
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Storage;
+use App\Services\HlsStreamService;
 
 class FailoverStreamController extends Controller
 {
+    protected HlsStreamService $hlsService;
+
+    public function __construct(HlsStreamService $hlsStreamService)
+    {
+        $this->hlsService = $hlsStreamService;
+    }
+
     public function __invoke(Request $request, FailoverChannel $failoverChannel, string $format = 'ts')
     {
         if (!in_array($format, ['ts', 'mp4'])) {
@@ -64,7 +74,7 @@ class FailoverStreamController extends Controller
                 $ffprobePath = 'ffprobe';
             }
 
-            $precheckCmd = $ffprobePath . " -v quiet -print_format json -show_streams -select_streams v:0 -user_agent " . escapeshellarg($currentStreamUserAgent) . " -multiple_requests 1 -reconnect_on_network_error 1 -reconnect_on_http_error 5xx,4xx -reconnect_streamed 1 -reconnect_delay_max 2 -timeout 5000000 " . escapeshellarg($streamUrl);
+            $precheckCmd = $ffprobePath . " -v quiet -print_format json -show_streams -select_streams v:0 -user_agent " . escapeshellarg($currentStreamUserAgent) . " -multiple_requests 1 -reconnect_on_network_error 1 -reconnect_on_http_error 5xx,4xx,509 -reconnect_streamed 1 -reconnect_delay_max 2 -timeout 5000000 " . escapeshellarg($streamUrl);
             Log::channel('ffmpeg')->info("[PRE-CHECK] Executing ffprobe command for [{$currentStreamTitle}]: {$precheckCmd}");
             
             $precheckProcess = SymfonyProcess::fromShellCommandline($precheckCmd);
@@ -118,7 +128,7 @@ class FailoverStreamController extends Controller
             $cmd .= $hwaccelArgs;
             $cmd .= "-user_agent ".$escapedUserAgent." -referer \"MyComputer\" " .
                     '-multiple_requests 1 -reconnect_on_network_error 1 ' .
-                    '-reconnect_on_http_error 5xx,4xx -reconnect_streamed 1 ' .
+                    '-reconnect_on_http_error 5xx,4xx,509 -reconnect_streamed 1 ' .
                     '-reconnect_delay_max 5';
             if (stripos($streamUrl, '.mkv') !== false) {
                 $cmd .= ' -analyzeduration 10M -probesize 10M';
@@ -248,23 +258,128 @@ class FailoverStreamController extends Controller
     public function serveHlsPlaylist(Request $request, FailoverChannel $failoverChannel)
     {
         Log::channel('ffmpeg')->info("HLS playlist requested for Failover Channel: {$failoverChannel->name} (ID: {$failoverChannel->id})");
-        $primarySource = $failoverChannel->sources()
-                                       ->where('channels.enabled', true) 
-                                       ->first();
 
-        if (!$primarySource) {
-            Log::channel('ffmpeg')->error("No enabled sources found for Failover Channel HLS: {$failoverChannel->name}");
-            abort(404, 'No enabled sources found for this failover channel.');
+        $sessionCacheKey = 'hls:failover_session:' . $failoverChannel->id;
+        $sessionData = Cache::get($sessionCacheKey);
+
+        $sources = $sessionData['sources_list'] ?? null;
+        $currentSourceIndex = $sessionData['current_source_index'] ?? -1;
+        $currentSource = null;
+        $pid = $sessionData['current_ffmpeg_pid'] ?? null;
+        $currentSourceChannelId = $sessionData['current_source_channel_id'] ?? null;
+
+        if ($sources === null) {
+            Log::channel('ffmpeg')->info("HLS Failover: No session found for {$failoverChannel->name}. Initializing sources.");
+            $allEnabledSources = $failoverChannel->sources()
+                                               ->where('channels.enabled', true)
+                                               ->orderBy('pivot_order', 'asc') // Ensure 'pivot_order' is correct
+                                               ->get();
+
+            if ($allEnabledSources->isEmpty()) {
+                Log::channel('ffmpeg')->error("HLS Failover: No enabled sources for {$failoverChannel->name}.");
+                abort(404, 'No enabled sources found for this failover channel.');
+            }
+
+            $sources = $allEnabledSources->map(function ($src) {
+                return [
+                    'id' => $src->id,
+                    'url' => $src->url_custom ?? $src->url,
+                    'user_agent' => $src->playlist->user_agent ?? null,
+                    'title' => strip_tags($src->title_custom ?? $src->title ?? $src->name ?? "Source {$src->id}")
+                ];
+            })->toArray();
+            
+            $currentSourceIndex = -1; // Will be incremented before first use
+            $pid = null;
+            Log::channel('ffmpeg')->info("HLS Failover: Sources initialized for {$failoverChannel->name}. Found " . count($sources) . " sources.");
         }
 
-        Log::channel('ffmpeg')->info("Using source channel '{$primarySource->name}' (ID: {$primarySource->id}) for HLS playlist for Failover Channel '{$failoverChannel->name}'.");
-        
-        $targetHlsPlaylistUrl = route('hls.playlist', [
-            'type' => 'channel', 
-            'id' => $primarySource->id
-        ]);
+        if ($pid !== null && $currentSourceChannelId !== null && $this->hlsService->isRunning('channel', $currentSourceChannelId)) {
+            // Current source is presumably healthy
+            $currentSource = $sources[$currentSourceIndex];
+            Log::channel('ffmpeg')->info("HLS Failover: Existing FFmpeg process (PID: {$pid}) for source {$currentSource['id']} is running for {$failoverChannel->name}.");
+        } else {
+            if ($pid !== null) {
+                 Log::channel('ffmpeg')->warning("HLS Failover: FFmpeg process (PID: {$pid}) for source {$currentSourceChannelId} is no longer running for {$failoverChannel->name}. Attempting next source.");
+            }
+            $currentSourceIndex++;
 
-        Log::channel('ffmpeg')->info("Redirecting Failover HLS request for '{$failoverChannel->name}' to source '{$primarySource->name}' HLS playlist: {$targetHlsPlaylistUrl}");
-        return Redirect::to($targetHlsPlaylistUrl);
+            if ($currentSourceIndex >= count($sources)) {
+                Cache::forget($sessionCacheKey);
+                Log::channel('ffmpeg')->error("HLS Failover: All sources exhausted for {$failoverChannel->name}.");
+                abort(503, "All HLS sources for Failover Channel {$failoverChannel->name} failed or are unavailable.");
+            }
+
+            $currentSource = $sources[$currentSourceIndex];
+            $currentSourceChannelId = $currentSource['id']; // Update currentSourceChannelId
+            Log::channel('ffmpeg')->info("HLS Failover: Attempting to start stream for new source {$currentSource['id']} ({$currentSource['title']}) at index {$currentSourceIndex} for {$failoverChannel->name}.");
+
+            try {
+                // Stop any potentially lingering process for a *different* source ID from a previous failover attempt for this *same* failover channel session
+                if ($pid !== null && $sessionData['current_source_channel_id'] !== $currentSource['id']) {
+                    Log::channel('ffmpeg')->info("HLS Failover: Stopping lingering FFmpeg (PID: {$pid}) for old source {$sessionData['current_source_channel_id']} before starting new one for {$currentSource['id']}.");
+                    $this->hlsService->stopStream('channel', $sessionData['current_source_channel_id']);
+                }
+
+                $pid = $this->hlsService->startStream(
+                    type: 'channel',
+                    id: $currentSource['id'],
+                    streamUrl: $currentSource['url'],
+                    title: $currentSource['title'],
+                    userAgent: $currentSource['user_agent']
+                );
+                Log::channel('ffmpeg')->info("HLS Failover: Successfully started FFmpeg (PID: {$pid}) for source {$currentSource['id']} for {$failoverChannel->name}.");
+            } catch (Exception $e) {
+                Log::channel('ffmpeg')->error("HLS Failover: Failed to start stream for source {$currentSource['id']} (Failover: {$failoverChannel->name}): " . $e->getMessage());
+                $pid = null; // Ensure pid is null if startStream failed
+            }
+        }
+        
+        // Update session state
+        $sessionData = [
+            'sources_list' => $sources,
+            'current_source_index' => $currentSourceIndex,
+            'current_source_channel_id' => $currentSource['id'], // Use ID from the definitely assigned $currentSource
+            'current_ffmpeg_pid' => $pid
+        ];
+        Cache::put($sessionCacheKey, $sessionData, now()->addHours(6));
+        Log::channel('ffmpeg')->info("HLS Failover: Session updated for {$failoverChannel->name}. Current source ID: {$currentSource['id']}, PID: {$pid}.");
+
+        // Serve Playlist
+        $playlistPath = Storage::disk('app')->path("hls/{$currentSource['id']}/stream.m3u8");
+        $playlistReady = false;
+        for ($i = 0; $i < 10; $i++) { // 10 attempts, 1 sec sleep
+            if (file_exists($playlistPath) && filesize($playlistPath) > 0) {
+                $playlistReady = true;
+                break;
+            }
+            if (!$this->hlsService->isRunning('channel', $currentSource['id'])) {
+                Log::channel('ffmpeg')->error("HLS Failover: FFmpeg process (PID: {$pid}) for source {$currentSource['id']} died while waiting for playlist for {$failoverChannel->name}.");
+                // Clear PID from session so next request attempts failover
+                $sessionData['current_ffmpeg_pid'] = null;
+                Cache::put($sessionCacheKey, $sessionData, now()->addHours(6));
+                abort(503, "Playlist generation failed as stream ended prematurely. Please try again.");
+            }
+            sleep(1);
+        }
+
+        if ($playlistReady) {
+            Log::channel('ffmpeg')->info("HLS Failover: Playlist found for source {$currentSource['id']}. Serving to client for {$failoverChannel->name}. Path: {$playlistPath}");
+            return response('', 200, [
+                'Content-Type'      => 'application/vnd.apple.mpegurl',
+                'X-Accel-Redirect'  => "/internal/hls/{$currentSource['id']}/stream.m3u8",
+                'Cache-Control'     => 'no-cache, no-transform',
+                'Connection'        => 'keep-alive',
+            ]);
+        } else {
+            if (!$this->hlsService->isRunning('channel', $currentSource['id'])) {
+                Log::channel('ffmpeg')->error("HLS Failover: Playlist not found and FFmpeg process (PID: {$pid}) for source {$currentSource['id']} is NOT running for {$failoverChannel->name}. Forcing re-evaluation.");
+                Cache::forget($sessionCacheKey); // Force re-evaluation on next request
+                abort(404, "Playlist not found for current source and process died.");
+            } else {
+                Log::channel('ffmpeg')->warning("HLS Failover: Playlist for source {$currentSource['id']} not ready after 10s for {$failoverChannel->name}, but FFmpeg (PID: {$pid}) still running. Client should retry.");
+                abort(503, "Playlist not ready, please try again shortly.");
+            }
+        }
     }
 }
