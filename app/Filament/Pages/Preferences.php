@@ -121,15 +121,13 @@ class Preferences extends SettingsPage
                                             ->columnSpan('full')
                                             ->default('/dev/dri/renderD128')
                                             ->placeholder('/dev/dri/renderD128')
-                                            ->helperText('e.g., /dev/dri/renderD128 or /dev/dri/card0')
-                                            ->hidden(fn (Get $get): bool => !$get('ffmpeg_vaapi_enabled')),
+                                            ->helperText('e.g., /dev/dri/renderD128 or /dev/dri/card0'),
                                         Forms\Components\TextInput::make('ffmpeg_vaapi_video_filter')
                                             ->label('VA-API Video Filter')
                                             ->columnSpan('full')
                                             ->default('scale_vaapi=format=nv12')
                                             ->placeholder('scale_vaapi=format=nv12')
-                                            ->helperText("e.g., scale_vaapi=w=1280:h=720:format=nv12. Applied using -vf. Ensure 'format=' is usually nv12 or vaapi.")
-                                            ->hidden(fn (Get $get): bool => !$get('ffmpeg_vaapi_enabled')),
+                                            ->helperText("e.g., scale_vaapi=w=1280:h=720:format=nv12. Applied using -vf. Ensure 'format=' is usually nv12 or vaapi."),
 
                                         // QSV Settings
                                         Forms\Components\Toggle::make('ffmpeg_qsv_enabled')
@@ -141,28 +139,24 @@ class Preferences extends SettingsPage
                                             ->label('QSV Device Path')
                                             ->columnSpan('full')
                                             ->placeholder('/dev/dri/renderD128')
-                                            ->helperText('e.g., /dev/dri/renderD128. This is passed to init_hw_device.')
-                                            ->hidden(fn (Get $get): bool => !$get('ffmpeg_qsv_enabled')),
+                                            ->helperText('e.g., /dev/dri/renderD128. This is passed to init_hw_device.'),
                                         Forms\Components\TextInput::make('ffmpeg_qsv_video_filter')
                                             ->label('QSV Video Filter (Optional)')
                                             ->columnSpan('full')
                                             ->placeholder('vpp_qsv=w=1280:h=720:format=nv12')
-                                            ->helperText('e.g., vpp_qsv=w=1280:h=720:format=nv12 for scaling. Applied using -vf.')
-                                            ->hidden(fn (Get $get): bool => !$get('ffmpeg_qsv_enabled')),
+                                            ->helperText('e.g., vpp_qsv=w=1280:h=720:format=nv12 for scaling. Applied using -vf.'),
                                         Forms\Components\Textarea::make('ffmpeg_qsv_encoder_options')
                                             ->label('QSV Encoder Options (Optional)')
                                             ->columnSpan('full')
                                             ->placeholder('e.g., -profile:v high -g 90 -look_ahead 1')
                                             ->helperText('Additional options for the h264_qsv (or hevc_qsv) encoder.')
-                                            ->rows(3)
-                                            ->hidden(fn (Get $get): bool => !$get('ffmpeg_qsv_enabled')),
+                                            ->rows(3),
                                         Forms\Components\Textarea::make('ffmpeg_qsv_additional_args')
                                             ->label('Additional QSV Arguments (Optional)')
                                             ->columnSpan('full')
                                             ->placeholder('e.g., -low_power 1 for some QSV encoders')
                                             ->helperText('Advanced: Additional FFmpeg arguments specific to your QSV setup. Use with caution.')
-                                            ->rows(3)
-                                            ->hidden(fn (Get $get): bool => !$get('ffmpeg_qsv_enabled')),
+                                            ->rows(3),
 
                                         $this->makeCodecSelect('video', 'ffmpeg_codec_video', 'videoCodecs'),
                                         $this->makeCodecSelect('audio', 'ffmpeg_codec_audio', 'audioCodecs'),
@@ -283,78 +277,6 @@ class Preferences extends SettingsPage
                             ]),
                     ])
             ]);
-    }
-
-    protected function mutateFormStatesBeforeSave(array $data): array
-    {
-        // Get the currently loaded settings instance for this page.
-        // This instance ($this->settings) holds the values as they were loaded from the DB
-        // or their defaults if never saved.
-        $currentSettingsValues = $this->settings;
-
-        // For each QSV detail field, ensure it's present in the $data array.
-        // If the key exists in $data (i.e., QSV toggle was ON, field was visible and submitted),
-        // its value from the form will be used.
-        // If the key does NOT exist in $data (i.e., QSV toggle was OFF, field was hidden),
-        // the current value from $currentSettingsValues (persisted or default) will be used.
-        // This guarantees the key is always passed to the settings->fill() method.
-
-        $data['ffmpeg_qsv_device'] = $data['ffmpeg_qsv_device'] ?? $currentSettingsValues->ffmpeg_qsv_device;
-        $data['ffmpeg_qsv_video_filter'] = $data['ffmpeg_qsv_video_filter'] ?? $currentSettingsValues->ffmpeg_qsv_video_filter;
-        $data['ffmpeg_qsv_encoder_options'] = $data['ffmpeg_qsv_encoder_options'] ?? $currentSettingsValues->ffmpeg_qsv_encoder_options;
-        
-        // Although 'ffmpeg_qsv_additional_args' was not reported in the error,
-        // applying the same pattern ensures consistency and safety for all
-        // conditionally hidden fields within this QSV group.
-        $data['ffmpeg_qsv_additional_args'] = $data['ffmpeg_qsv_additional_args'] ?? $currentSettingsValues->ffmpeg_qsv_additional_args;
-
-        return $data;
-    }
-
-    public function save(): void
-    {
-        // Perform form validation (standard Filament hook calls)
-        $this->callHook('beforeValidate');
-        $this->form->validate(); // This will throw a ValidationException on failure.
-        $this->callHook('afterValidate');
-
-        // Get the validated data from the form
-        $data = $this->form->getState();
-
-        // Correctly get the settings model instance
-        $settingsInstance = $this->getSettingsRecord();
-
-        // --- Custom logic to handle QSV fields ---
-        // If QSV is disabled in the form, the specific QSV setting fields
-        // would be hidden and thus absent from $data. We need to ensure they
-        // are present in the $data array with their current persisted values
-        // before filling and saving the settings object.
-        if (!($data['ffmpeg_qsv_enabled'] ?? false)) {
-            $data['ffmpeg_qsv_device'] = $settingsInstance->ffmpeg_qsv_device;
-            $data['ffmpeg_qsv_video_filter'] = $settingsInstance->ffmpeg_qsv_video_filter;
-            $data['ffmpeg_qsv_encoder_options'] = $settingsInstance->ffmpeg_qsv_encoder_options;
-            $data['ffmpeg_qsv_additional_args'] = $settingsInstance->ffmpeg_qsv_additional_args;
-        }
-        // --- End custom logic ---
-
-        // Call pre-save hook (standard Filament hook call)
-        $this->callHook('beforeSave');
-
-        // Fill the settings object with the (potentially modified) data and save,
-        // using the correctly obtained settings instance.
-        $settingsInstance->fill($data);
-        $settingsInstance->save();
-
-        // Call post-save hook (standard Filament hook call)
-        $this->callHook('afterSave');
-
-        // Send success notification (standard Filament behavior)
-        $this->getSavedNotification()?->send();
-
-        // Handle redirects if specified (standard Filament behavior)
-        if ($redirectUrl = $this->getRedirectUrl()) {
-            $this->redirect($redirectUrl);
-        }
     }
 
     // Handles generation of the codec select fields
