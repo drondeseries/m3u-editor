@@ -76,6 +76,11 @@ class CustomPlaylistResource extends Resource
                     ->description(fn(CustomPlaylist $record): string => "Enabled: {$record->enabled_channels_count}")
                     ->toggleable()
                     ->sortable(),
+                Tables\Columns\TextColumn::make('failover_channels_count')
+                    ->label('Failovers')
+                    ->counts('failoverChannels')
+                    ->toggleable()
+                    ->sortable(),
                 Tables\Columns\ToggleColumn::make('enable_proxy')
                     ->label('Proxy')
                     ->toggleable()

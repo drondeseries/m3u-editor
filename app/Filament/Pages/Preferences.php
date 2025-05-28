@@ -130,6 +130,40 @@ class Preferences extends SettingsPage
                                             ->placeholder('scale_vaapi=format=nv12')
                                             ->helperText("e.g., scale_vaapi=w=1280:h=720:format=nv12. Applied using -vf. Ensure 'format=' is usually nv12 or vaapi.")
                                             ->hidden(fn (Get $get): bool => !$get('ffmpeg_vaapi_enabled')),
+
+                                        // QSV Settings
+                                        Forms\Components\Toggle::make('ffmpeg_qsv_enabled')
+                                            ->label('Enable QSV (Intel Quick Sync Video)')
+                                            ->columnSpan('full')
+                                            ->helperText('Uses QSV for hardware acceleration. Ensure FFmpeg is compiled with QSV support and your Intel iGPU is correctly configured (e.g., /dev/dri/renderD128 accessible).')
+                                            ->live(),
+                                        Forms\Components\TextInput::make('ffmpeg_qsv_device')
+                                            ->label('QSV Device Path')
+                                            ->columnSpan('full')
+                                            ->placeholder('/dev/dri/renderD128')
+                                            ->helperText('e.g., /dev/dri/renderD128. This is passed to init_hw_device.')
+                                            ->hidden(fn (Get $get): bool => !$get('ffmpeg_qsv_enabled')),
+                                        Forms\Components\TextInput::make('ffmpeg_qsv_video_filter')
+                                            ->label('QSV Video Filter (Optional)')
+                                            ->columnSpan('full')
+                                            ->placeholder('vpp_qsv=w=1280:h=720:format=nv12')
+                                            ->helperText('e.g., vpp_qsv=w=1280:h=720:format=nv12 for scaling. Applied using -vf.')
+                                            ->hidden(fn (Get $get): bool => !$get('ffmpeg_qsv_enabled')),
+                                        Forms\Components\Textarea::make('ffmpeg_qsv_encoder_options')
+                                            ->label('QSV Encoder Options (Optional)')
+                                            ->columnSpan('full')
+                                            ->placeholder('e.g., -profile:v high -g 90 -look_ahead 1')
+                                            ->helperText('Additional options for the h264_qsv (or hevc_qsv) encoder.')
+                                            ->rows(3)
+                                            ->hidden(fn (Get $get): bool => !$get('ffmpeg_qsv_enabled')),
+                                        Forms\Components\Textarea::make('ffmpeg_qsv_additional_args')
+                                            ->label('Additional QSV Arguments (Optional)')
+                                            ->columnSpan('full')
+                                            ->placeholder('e.g., -low_power 1 for some QSV encoders')
+                                            ->helperText('Advanced: Additional FFmpeg arguments specific to your QSV setup. Use with caution.')
+                                            ->rows(3)
+                                            ->hidden(fn (Get $get): bool => !$get('ffmpeg_qsv_enabled')),
+
                                         $this->makeCodecSelect('video', 'ffmpeg_codec_video', 'videoCodecs'),
                                         $this->makeCodecSelect('audio', 'ffmpeg_codec_audio', 'audioCodecs'),
                                         $this->makeCodecSelect('subtitle', 'ffmpeg_codec_subtitles', 'subtitleCodecs'),
