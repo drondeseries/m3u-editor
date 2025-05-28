@@ -129,7 +129,287 @@ class HlsStreamServiceTest extends TestCase
             }
         }
     }
+
+    public function test_ffmpeg_command_with_qsv_enabled_defaults()
+    {
+        // Arrange: QSV enabled with default settings
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_qsv_enabled')->andReturn(true);
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_qsv_device')->andReturn('/dev/dri/renderD128');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_qsv_video_filter')->andReturn(null);
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_qsv_encoder_options')->andReturn(null);
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_qsv_additional_args')->andReturn(null);
+
+        // VA-API must be off for QSV to be chosen
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_vaapi_enabled')->andReturn(false);
+        // Other necessary settings
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_codec_video')->andReturn('libx264'); // Base, will be overridden
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_codec_audio')->andReturn('aac');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_codec_subtitles')->andReturn('copy');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_path')->andReturn('ffmpeg');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_user_agent')->andReturn('TestAgent');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_debug')->andReturn(false);
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_max_tries')->andReturn(3);
+        // Mock VAAPI specific settings even if not used, to ensure they are not accidentally picked up
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_vaapi_device')->andReturn('/dev/dri/renderD128');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_vaapi_video_filter')->andReturn('scale_vaapi=format=nv12');
+
+
+        Config::shouldReceive('get')->with('proxy.ffmpeg_additional_args', '')->andReturn('');
+        Config::shouldReceive('get')->with('proxy.ffmpeg_path')->andReturn(null);
+        Config::shouldReceive('get')->with('proxy.ffmpeg_codec_video')->andReturn(null);
+        Config::shouldReceive('get')->with('proxy.ffmpeg_codec_audio')->andReturn(null);
+        Config::shouldReceive('get')->with('proxy.ffmpeg_codec_subtitles')->andReturn(null);
+
+        Log::shouldReceive('channel')->with('ffmpeg')->andReturnSelf();
+        Log::shouldReceive('info')->once()->withArgs(function ($message) {
+            $this->assertStringContainsString('ffmpeg', $message);
+            $this->assertStringContainsString("-init_hw_device qsv=qsv_hw:'/dev/dri/renderD128'", $message);
+            $this->assertStringContainsString('-hwaccel qsv -hwaccel_device qsv_hw -hwaccel_output_format qsv', $message);
+            $this->assertStringContainsString('-c:v h264_qsv', $message);
+            $this->assertStringNotContainsString('-vf', $message); // No filter
+            $this->assertStringNotContainsString('h264_vaapi', $message); // VA-API not present
+            $this->assertStringNotContainsString('-hwaccel vaapi', $message); // VA-API not present
+            return true;
+        });
+        Log::shouldReceive('error');
+
+        try {
+            $this->hlsStreamService->startStream('channel', 'qsv_default', 'http://test.stream', 'Test QSV Defaults');
+        } catch (\Exception $e) {
+            if (strpos($e->getMessage(), 'proc_open') === false && strpos($e->getMessage(), 'proc_get_status') === false && strpos($e->getMessage(), 'Unable to launch process') === false) {
+                $this->fail('Unexpected exception type or message: ' . $e->getMessage());
+            }
+        }
+    }
+
+    public function test_ffmpeg_command_with_qsv_enabled_custom_device()
+    {
+        // Arrange: QSV enabled with custom device
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_qsv_enabled')->andReturn(true);
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_qsv_device')->andReturn('/dev/dri/renderD129'); // Custom
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_qsv_video_filter')->andReturn(null);
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_qsv_encoder_options')->andReturn(null);
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_qsv_additional_args')->andReturn(null);
+
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_vaapi_enabled')->andReturn(false);
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_codec_video')->andReturn('libx264');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_codec_audio')->andReturn('aac');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_codec_subtitles')->andReturn('copy');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_path')->andReturn('ffmpeg');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_user_agent')->andReturn('TestAgent');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_debug')->andReturn(false);
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_max_tries')->andReturn(3);
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_vaapi_device')->andReturn('/dev/dri/renderD128');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_vaapi_video_filter')->andReturn('scale_vaapi=format=nv12');
+
+
+        Config::shouldReceive('get')->with('proxy.ffmpeg_additional_args', '')->andReturn('');
+        Config::shouldReceive('get')->with('proxy.ffmpeg_path')->andReturn(null);
+        Config::shouldReceive('get')->with('proxy.ffmpeg_codec_video')->andReturn(null);
+        Config::shouldReceive('get')->with('proxy.ffmpeg_codec_audio')->andReturn(null);
+        Config::shouldReceive('get')->with('proxy.ffmpeg_codec_subtitles')->andReturn(null);
+
+        Log::shouldReceive('channel')->with('ffmpeg')->andReturnSelf();
+        Log::shouldReceive('info')->once()->withArgs(function ($message) {
+            $this->assertStringContainsString("-init_hw_device qsv=qsv_hw:'/dev/dri/renderD129'", $message); // Custom device
+            $this->assertStringContainsString('-c:v h264_qsv', $message);
+            return true;
+        });
+        Log::shouldReceive('error');
+
+        try {
+            $this->hlsStreamService->startStream('channel', 'qsv_custom_device', 'http://test.stream', 'Test QSV Custom Device');
+        } catch (\Exception $e) {
+            if (strpos($e->getMessage(), 'proc_open') === false && strpos($e->getMessage(), 'proc_get_status') === false && strpos($e->getMessage(), 'Unable to launch process') === false) {
+                $this->fail('Unexpected exception type or message: ' . $e->getMessage());
+            }
+        }
+    }
+
+    public function test_ffmpeg_command_with_qsv_enabled_with_filter()
+    {
+        // Arrange: QSV enabled with video filter
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_qsv_enabled')->andReturn(true);
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_qsv_device')->andReturn('/dev/dri/renderD128');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_qsv_video_filter')->andReturn('vpp_qsv=w=1280:h=720:format=nv12'); // Custom filter
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_qsv_encoder_options')->andReturn(null);
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_qsv_additional_args')->andReturn(null);
+
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_vaapi_enabled')->andReturn(false);
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_codec_video')->andReturn('libx264');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_codec_audio')->andReturn('aac');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_codec_subtitles')->andReturn('copy');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_path')->andReturn('ffmpeg');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_user_agent')->andReturn('TestAgent');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_debug')->andReturn(false);
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_max_tries')->andReturn(3);
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_vaapi_device')->andReturn('/dev/dri/renderD128');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_vaapi_video_filter')->andReturn('scale_vaapi=format=nv12');
+
+        Config::shouldReceive('get')->with('proxy.ffmpeg_additional_args', '')->andReturn('');
+        Config::shouldReceive('get')->with('proxy.ffmpeg_path')->andReturn(null);
+        Config::shouldReceive('get')->with('proxy.ffmpeg_codec_video')->andReturn(null);
+        Config::shouldReceive('get')->with('proxy.ffmpeg_codec_audio')->andReturn(null);
+        Config::shouldReceive('get')->with('proxy.ffmpeg_codec_subtitles')->andReturn(null);
+
+        Log::shouldReceive('channel')->with('ffmpeg')->andReturnSelf();
+        Log::shouldReceive('info')->once()->withArgs(function ($message) {
+            $this->assertStringContainsString("-vf 'vpp_qsv=w=1280:h=720:format=nv12'", $message); // Custom filter
+            $this->assertStringContainsString('-c:v h264_qsv', $message);
+            return true;
+        });
+        Log::shouldReceive('error');
+
+        try {
+            $this->hlsStreamService->startStream('channel', 'qsv_filter', 'http://test.stream', 'Test QSV Filter');
+        } catch (\Exception $e) {
+            if (strpos($e->getMessage(), 'proc_open') === false && strpos($e->getMessage(), 'proc_get_status') === false && strpos($e->getMessage(), 'Unable to launch process') === false) {
+                $this->fail('Unexpected exception type or message: ' . $e->getMessage());
+            }
+        }
+    }
+
+    public function test_ffmpeg_command_with_qsv_enabled_with_encoder_options()
+    {
+        // Arrange: QSV enabled with encoder options
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_qsv_enabled')->andReturn(true);
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_qsv_device')->andReturn('/dev/dri/renderD128');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_qsv_video_filter')->andReturn(null);
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_qsv_encoder_options')->andReturn('-profile:v high -g 90'); // Encoder options
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_qsv_additional_args')->andReturn(null);
+
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_vaapi_enabled')->andReturn(false);
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_codec_video')->andReturn('libx264');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_codec_audio')->andReturn('aac');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_codec_subtitles')->andReturn('copy');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_path')->andReturn('ffmpeg');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_user_agent')->andReturn('TestAgent');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_debug')->andReturn(false);
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_max_tries')->andReturn(3);
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_vaapi_device')->andReturn('/dev/dri/renderD128');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_vaapi_video_filter')->andReturn('scale_vaapi=format=nv12');
+
+        Config::shouldReceive('get')->with('proxy.ffmpeg_additional_args', '')->andReturn('');
+        Config::shouldReceive('get')->with('proxy.ffmpeg_path')->andReturn(null);
+        Config::shouldReceive('get')->with('proxy.ffmpeg_codec_video')->andReturn(null);
+        Config::shouldReceive('get')->with('proxy.ffmpeg_codec_audio')->andReturn(null);
+        Config::shouldReceive('get')->with('proxy.ffmpeg_codec_subtitles')->andReturn(null);
+
+        Log::shouldReceive('channel')->with('ffmpeg')->andReturnSelf();
+        Log::shouldReceive('info')->once()->withArgs(function ($message) {
+            // Note: The implementation adds a space after encoder options if present.
+            $this->assertStringContainsString('-c:v h264_qsv -profile:v high -g 90 ', $message); // Encoder options
+            return true;
+        });
+        Log::shouldReceive('error');
+
+        try {
+            $this->hlsStreamService->startStream('channel', 'qsv_encoder_opts', 'http://test.stream', 'Test QSV Encoder Options');
+        } catch (\Exception $e) {
+            if (strpos($e->getMessage(), 'proc_open') === false && strpos($e->getMessage(), 'proc_get_status') === false && strpos($e->getMessage(), 'Unable to launch process') === false) {
+                $this->fail('Unexpected exception type or message: ' . $e->getMessage());
+            }
+        }
+    }
+
+    public function test_ffmpeg_command_with_qsv_enabled_with_additional_args()
+    {
+        // Arrange: QSV enabled with additional args
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_qsv_enabled')->andReturn(true);
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_qsv_device')->andReturn('/dev/dri/renderD128');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_qsv_video_filter')->andReturn(null);
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_qsv_encoder_options')->andReturn(null);
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_qsv_additional_args')->andReturn('-some_qsv_specific_arg value'); // Additional args
+
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_vaapi_enabled')->andReturn(false);
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_codec_video')->andReturn('libx264');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_codec_audio')->andReturn('aac');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_codec_subtitles')->andReturn('copy');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_path')->andReturn('ffmpeg');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_user_agent')->andReturn('TestAgent');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_debug')->andReturn(false);
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_max_tries')->andReturn(3);
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_vaapi_device')->andReturn('/dev/dri/renderD128');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_vaapi_video_filter')->andReturn('scale_vaapi=format=nv12');
+
+        Config::shouldReceive('get')->with('proxy.ffmpeg_additional_args', '')->andReturn(''); // No general additional args for clarity
+        Config::shouldReceive('get')->with('proxy.ffmpeg_path')->andReturn(null);
+        Config::shouldReceive('get')->with('proxy.ffmpeg_codec_video')->andReturn(null);
+        Config::shouldReceive('get')->with('proxy.ffmpeg_codec_audio')->andReturn(null);
+        Config::shouldReceive('get')->with('proxy.ffmpeg_codec_subtitles')->andReturn(null);
+
+        Log::shouldReceive('channel')->with('ffmpeg')->andReturnSelf();
+        Log::shouldReceive('info')->once()->withArgs(function ($message) {
+            // Implementation prepends QSV additional args to userArgs
+            $this->assertStringContainsString('-some_qsv_specific_arg value', $message);
+            $this->assertStringContainsString('-c:v h264_qsv', $message);
+            // Check order if general args were present
+            // $this->assertStringStartsWith('ffmpeg -init_hw_device [...] -some_qsv_specific_arg value [...] -re -i', $relevantPartOfMessage);
+            return true;
+        });
+        Log::shouldReceive('error');
+
+        try {
+            $this->hlsStreamService->startStream('channel', 'qsv_add_args', 'http://test.stream', 'Test QSV Additional Args');
+        } catch (\Exception $e) {
+            if (strpos($e->getMessage(), 'proc_open') === false && strpos($e->getMessage(), 'proc_get_status') === false && strpos($e->getMessage(), 'Unable to launch process') === false) {
+                $this->fail('Unexpected exception type or message: ' . $e->getMessage());
+            }
+        }
+    }
     
+    public function test_ffmpeg_command_with_qsv_enabled_and_vaapi_enabled_qsv_takes_precedence()
+    {
+        // Arrange: Both QSV and VA-API enabled, QSV should take precedence
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_qsv_enabled')->andReturn(true);
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_qsv_device')->andReturn('/dev/dri/qsv_device');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_qsv_video_filter')->andReturn(null);
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_qsv_encoder_options')->andReturn(null);
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_qsv_additional_args')->andReturn(null);
+
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_vaapi_enabled')->andReturn(true); // VA-API also enabled
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_vaapi_device')->andReturn('/dev/dri/vaapi_device'); // Different device to distinguish
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_vaapi_video_filter')->andReturn('scale_vaapi=format=nv12');
+
+
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_codec_video')->andReturn('libx264');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_codec_audio')->andReturn('aac');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_codec_subtitles')->andReturn('copy');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_path')->andReturn('ffmpeg');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_user_agent')->andReturn('TestAgent');
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_debug')->andReturn(false);
+        $this->generalSettingsMock->shouldReceive('__get')->with('ffmpeg_max_tries')->andReturn(3);
+
+        Config::shouldReceive('get')->with('proxy.ffmpeg_additional_args', '')->andReturn('');
+        Config::shouldReceive('get')->with('proxy.ffmpeg_path')->andReturn(null);
+        Config::shouldReceive('get')->with('proxy.ffmpeg_codec_video')->andReturn(null);
+        Config::shouldReceive('get')->with('proxy.ffmpeg_codec_audio')->andReturn(null);
+        Config::shouldReceive('get')->with('proxy.ffmpeg_codec_subtitles')->andReturn(null);
+
+        Log::shouldReceive('channel')->with('ffmpeg')->andReturnSelf();
+        Log::shouldReceive('info')->once()->withArgs(function ($message) {
+            // Assert QSV args are present
+            $this->assertStringContainsString("-init_hw_device qsv=qsv_hw:'/dev/dri/qsv_device'", $message);
+            $this->assertStringContainsString('-hwaccel qsv -hwaccel_device qsv_hw -hwaccel_output_format qsv', $message);
+            $this->assertStringContainsString('-c:v h264_qsv', $message);
+
+            // Assert VA-API args are NOT present
+            $this->assertStringNotContainsString('vaapi_device', $message);
+            $this->assertStringNotContainsString('-hwaccel vaapi', $message);
+            $this->assertStringNotContainsString('h264_vaapi', $message);
+            return true;
+        });
+        Log::shouldReceive('error');
+
+        try {
+            $this->hlsStreamService->startStream('channel', 'qsv_over_vaapi', 'http://test.stream', 'Test QSV Takes Precedence');
+        } catch (\Exception $e) {
+            if (strpos($e->getMessage(), 'proc_open') === false && strpos($e->getMessage(), 'proc_get_status') === false && strpos($e->getMessage(), 'Unable to launch process') === false) {
+                $this->fail('Unexpected exception type or message: ' . $e->getMessage());
+            }
+        }
+    }
+
     protected function tearDown(): void
     {
         parent::tearDown();

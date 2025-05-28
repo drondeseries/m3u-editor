@@ -28,6 +28,11 @@ class GeneralSettings extends Settings
     public bool $ffmpeg_vaapi_enabled = false;
     public string $ffmpeg_vaapi_device = '/dev/dri/renderD128';
     public string $ffmpeg_vaapi_video_filter = 'scale_vaapi=format=nv12';
+    public bool $ffmpeg_qsv_enabled = false;
+    public ?string $ffmpeg_qsv_device = '/dev/dri/renderD128';
+    public ?string $ffmpeg_qsv_video_filter = 'vpp_qsv=format=nv12';
+    public ?string $ffmpeg_qsv_encoder_options = null;
+    public ?string $ffmpeg_qsv_additional_args = null;
 
     public static function group(): string
     {

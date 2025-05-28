@@ -59,10 +59,17 @@ class HlsStreamService
                     'ffmpeg_codec_subtitles' => $userPreferences->ffmpeg_codec_subtitles ?? $settings['ffmpeg_codec_subtitles'],
                     'ffmpeg_path' => $userPreferences->ffmpeg_path ?? $settings['ffmpeg_path'],
                     
-                    // VA-API settings should remain
+                    // VA-API settings
                     'ffmpeg_vaapi_enabled' => $userPreferences->ffmpeg_vaapi_enabled ?? $settings['ffmpeg_vaapi_enabled'],
                     'ffmpeg_vaapi_device' => $userPreferences->ffmpeg_vaapi_device ?? $settings['ffmpeg_vaapi_device'],
                     'ffmpeg_vaapi_video_filter' => $userPreferences->ffmpeg_vaapi_video_filter ?? $settings['ffmpeg_vaapi_video_filter'],
+
+                    // QSV settings
+                    'ffmpeg_qsv_enabled' => $userPreferences->ffmpeg_qsv_enabled ?? false, // Default from GeneralSettings
+                    'ffmpeg_qsv_device' => $userPreferences->ffmpeg_qsv_device ?? '/dev/dri/renderD128', // Default from GeneralSettings
+                    'ffmpeg_qsv_video_filter' => $userPreferences->ffmpeg_qsv_video_filter ?? 'vpp_qsv=format=nv12', // Default from GeneralSettings
+                    'ffmpeg_qsv_encoder_options' => $userPreferences->ffmpeg_qsv_encoder_options ?? null, // Default from GeneralSettings
+                    'ffmpeg_qsv_additional_args' => $userPreferences->ffmpeg_qsv_additional_args ?? null, // Default from GeneralSettings
                 ];
             } catch (Exception $e) {
                 // Ignore
@@ -84,29 +91,49 @@ class HlsStreamService
             $audioCodec = config('proxy.ffmpeg_codec_audio') ?: $settings['ffmpeg_codec_audio'];
             $subtitleCodec = config('proxy.ffmpeg_codec_subtitles') ?: $settings['ffmpeg_codec_subtitles'];
 
-            // Initialize VA-API and General Hw Accel Argument Variables
+            // Initialize Hardware Acceleration and Codec Specific Argument Variables
             $hwaccelInitArgs = '';
-            $hwaccelArgs = ''; 
+            $hwaccelArgs = '';
             $videoFilterArgs = '';
-            $codecSpecificArgs = '';
+            $codecSpecificArgs = ''; // For codec specific options like -profile:v
 
-            // VA-API Hardware Acceleration Logic
+            // Get user defined general options (these might be appended to by hw accel logic)
+            $userArgs = config('proxy.ffmpeg_additional_args', '');
+
+            // Hardware Acceleration Logic
             if ($settings['ffmpeg_vaapi_enabled'] ?? false) {
                 $videoCodec = 'h264_vaapi'; // Default VA-API H.264 encoder for HLS
-                $hwaccelInitArgs = "-init_hw_device vaapi=va_device:{$settings['ffmpeg_vaapi_device']} ";
+                $hwaccelInitArgs = "-init_hw_device vaapi=va_device:" . escapeshellarg($settings['ffmpeg_vaapi_device']) . " ";
                 $hwaccelArgs = "-hwaccel vaapi -hwaccel_device va_device -hwaccel_output_format vaapi ";
                 if (!empty($settings['ffmpeg_vaapi_video_filter'])) {
                     $videoFilterArgs = "-vf '" . trim($settings['ffmpeg_vaapi_video_filter'], "'") . "' ";
                 }
-                // $codecSpecificArgs remains empty for VA-API for HLS based on current needs
+                // $codecSpecificArgs typically remains empty for VA-API HLS, unless specific encoder options are needed.
+            } elseif ($settings['ffmpeg_qsv_enabled'] ?? false) {
+                $videoCodec = 'h264_qsv'; // Default QSV H.264 encoder
+                $qsvDeviceName = 'qsv_hw'; // Internal handle for FFmpeg hw device
+                $hwaccelInitArgs = "-init_hw_device qsv={$qsvDeviceName}:" . escapeshellarg($settings['ffmpeg_qsv_device']) . " ";
+                $hwaccelArgs = "-hwaccel qsv -hwaccel_device {$qsvDeviceName} -hwaccel_output_format qsv ";
+                if (!empty($settings['ffmpeg_qsv_video_filter'])) {
+                    $videoFilterArgs = "-vf '" . trim($settings['ffmpeg_qsv_video_filter'], "'") . "' ";
+                }
+                if (!empty($settings['ffmpeg_qsv_encoder_options'])) {
+                    $codecSpecificArgs = trim($settings['ffmpeg_qsv_encoder_options']) . " ";
+                }
+                if (!empty($settings['ffmpeg_qsv_additional_args'])) {
+                    // Append QSV-specific additional args to the general userArgs
+                    // Ensure space separation if $userArgs already has content.
+                    $userArgs = trim($settings['ffmpeg_qsv_additional_args']) . ($userArgs ? " " . $userArgs : "");
+                }
             }
-            // No else/elseif for QSV
+            // If neither VA-API nor QSV is enabled, $videoCodec remains its default value (e.g., 'libx264'),
+            // and hwaccel/filter args remain empty.
 
-            // Update $outputFormat (must be after VA-API logic)
-            $outputFormat = "-c:v $videoCodec -c:a $audioCodec -bsf:a aac_adtstoasc -c:s $subtitleCodec";
+            // Update $outputFormat (must be after HW Accel logic)
+            // Ensure $codecSpecificArgs has a trailing space if it's not empty.
+            $outputFormat = "-c:v $videoCodec " . ($codecSpecificArgs ? trim($codecSpecificArgs) . " " : "") . "-c:a $audioCodec -bsf:a aac_adtstoasc -c:s $subtitleCodec";
 
-            // Get user defined options
-            $userArgs = config('proxy.ffmpeg_additional_args', '');
+            // Ensure $userArgs has a trailing space if not empty, before being used in the command
             if (!empty($userArgs)) {
                 $userArgs .= ' ';
             }
@@ -139,13 +166,13 @@ class HlsStreamService
                     '-reconnect_on_http_error 5xx,4xx,509 -reconnect_streamed 1 ' .
                     '-reconnect_delay_max 5 -noautorotate ';
 
-            $cmd .= $userArgs; 
-            $cmd .= $codecSpecificArgs; 
+            $cmd .= $userArgs;
+            // $codecSpecificArgs is now part of $outputFormat
 
             $cmd .= '-re -i ' . escapeshellarg($streamUrl) . ' ';
             $cmd .= $videoFilterArgs; 
             
-            // $cmd .= '-preset veryfast -g 15 -keyint_min 15 -sc_threshold 0 '; // Removed as per instructions for VA-API
+            // $cmd .= '-preset veryfast -g 15 -keyint_min 15 -sc_threshold 0 ';
             $cmd .= $outputFormat . ' ';
 
             $cmd .= '-f hls -hls_time 2 -hls_list_size 6 ' .
