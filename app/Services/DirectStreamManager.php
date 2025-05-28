@@ -12,6 +12,15 @@ class DirectStreamManager
 {
     const MAX_IDLE_TIME = 10; // seconds
 
+    public static function determineVideoCodec(?string $codecFromSettingsInput): string
+    {
+        // If $codecFromSettingsInput is null (not set), it defaults to 'copy'.
+        // If it's explicitly set to '', it also becomes 'copy'.
+        // Otherwise, the set value is used.
+        $effectiveCodec = $codecFromSettingsInput ?? 'copy';
+        return ($effectiveCodec === '') ? 'copy' : $effectiveCodec;
+    }
+
     public function __construct()
     {
         // Setup the stream file paths
@@ -91,7 +100,8 @@ class DirectStreamManager
         $ffmpegPath = $settings['ffmpeg_path'] ?? 'jellyfin-ffmpeg';
 
         // Get codec settings
-        $videoCodec = $settings['ffmpeg_codec_video'] ?? 'copy';
+        // $settings['ffmpeg_codec_video'] is the input here
+        $videoCodec = self::determineVideoCodec($settings['ffmpeg_codec_video'] ?? null); // Ensure null is passed if not set
         $audioCodec = $settings['ffmpeg_codec_audio'] ?? 'copy';
         $subtitleCodec = $settings['ffmpeg_codec_subtitles'] ?? 'copy';
 

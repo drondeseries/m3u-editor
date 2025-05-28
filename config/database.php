@@ -45,7 +45,7 @@ return [
         'jobs' => [
             'driver' => 'sqlite',
             'url' => null,
-            'database' => database_path('jobs.sqlite'),
+            'database' => database_path('database.sqlite'), // Use the main sqlite database for tests
             'prefix' => '',
             'foreign_key_constraints' => true,
             'busy_timeout' => null,

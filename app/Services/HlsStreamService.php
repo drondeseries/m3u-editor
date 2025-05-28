@@ -12,6 +12,17 @@ use Illuminate\Support\Facades\Storage;
 
 class HlsStreamService
 {
+    public static function determineVideoCodec(?string $codecFromConfig, ?string $codecFromSettings): string
+    {
+        if ($codecFromConfig !== null && $codecFromConfig !== '') {
+            return $codecFromConfig;
+        } elseif ($codecFromSettings !== null && $codecFromSettings !== '') {
+            return $codecFromSettings;
+        } else {
+            return 'copy'; // Default to 'copy'
+        }
+    }
+
     /**
      * Start an HLS stream for the given channel.
      *
@@ -87,9 +98,11 @@ class HlsStreamService
             }
 
             // Get ffmpeg output codec formats
-            $videoCodec = config('proxy.ffmpeg_codec_video') ?: $settings['ffmpeg_codec_video'];
-            $audioCodec = config('proxy.ffmpeg_codec_audio') ?: $settings['ffmpeg_codec_audio'];
-            $subtitleCodec = config('proxy.ffmpeg_codec_subtitles') ?: $settings['ffmpeg_codec_subtitles'];
+            $codecFromConfig = config('proxy.ffmpeg_codec_video', null);
+            // $settings['ffmpeg_codec_video'] is already populated a few lines above this
+            $videoCodec = self::determineVideoCodec($codecFromConfig, $settings['ffmpeg_codec_video']);
+            $audioCodec = config('proxy.ffmpeg_codec_audio', null) ?: $settings['ffmpeg_codec_audio'];
+            $subtitleCodec = config('proxy.ffmpeg_codec_subtitles', null) ?: $settings['ffmpeg_codec_subtitles'];
 
             // Initialize Hardware Acceleration and Codec Specific Argument Variables
             $hwaccelInitArgs = '';

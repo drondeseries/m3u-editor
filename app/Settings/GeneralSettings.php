@@ -22,7 +22,7 @@ class GeneralSettings extends Settings
     public ?string $ffmpeg_user_agent = 'VLC/3.0.21 LibVLC/3.0.21';
     public ?bool $ffmpeg_debug = false;
     public ?int $ffmpeg_max_tries = 3;
-    public ?string $ffmpeg_codec_video = null;
+    public ?string $ffmpeg_codec_video = '';
     public ?string $ffmpeg_codec_audio = null;
     public ?string $ffmpeg_codec_subtitles = null;
     public ?string $mediaflow_proxy_url = null;
@@ -148,7 +148,7 @@ class GeneralSettings extends Settings
                         Select::make('ffmpeg_codec_video')
                             ->label('Video Codec')
                             ->options(fn (callable $get) => FfmpegCodecService::getVideoCodecs($get('hardware_acceleration_method')))
-                            ->default(null)
+                            ->default('')
                             ->reactive(),
                         Select::make('ffmpeg_codec_audio')
                             ->label('Audio Codec')
