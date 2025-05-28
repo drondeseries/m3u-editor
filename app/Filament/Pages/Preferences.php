@@ -311,6 +311,50 @@ class Preferences extends SettingsPage
         return $data;
     }
 
+    public function save(): void
+    {
+        // Perform form validation (standard Filament hook calls)
+        $this->callHook('beforeValidate');
+        $this->form->validate(); // This will throw a ValidationException on failure.
+        $this->callHook('afterValidate');
+
+        // Get the validated data from the form
+        $data = $this->form->getState();
+
+        // --- Custom logic to handle QSV fields ---
+        // If QSV is disabled in the form, the specific QSV setting fields
+        // (ffmpeg_qsv_device, etc.) would be hidden and thus absent from $data.
+        // We need to ensure they are present in the $data array with their current
+        // persisted values before filling and saving the settings object to prevent
+        // the MissingSettings error from spatie/laravel-settings.
+        if (!($data['ffmpeg_qsv_enabled'] ?? false)) {
+            // $this->settings is the loaded GeneralSettings instance
+            $data['ffmpeg_qsv_device'] = $this->settings->ffmpeg_qsv_device;
+            $data['ffmpeg_qsv_video_filter'] = $this->settings->ffmpeg_qsv_video_filter;
+            $data['ffmpeg_qsv_encoder_options'] = $this->settings->ffmpeg_qsv_encoder_options;
+            $data['ffmpeg_qsv_additional_args'] = $this->settings->ffmpeg_qsv_additional_args;
+        }
+        // --- End custom logic ---
+
+        // Call pre-save hook (standard Filament hook call)
+        $this->callHook('beforeSave');
+
+        // Fill the settings object with the (potentially modified) data and save
+        $this->settings->fill($data);
+        $this->settings->save();
+
+        // Call post-save hook (standard Filament hook call)
+        $this->callHook('afterSave');
+
+        // Send success notification (standard Filament behavior)
+        $this->getSavedNotification()?->send();
+
+        // Handle redirects if specified (standard Filament behavior)
+        if ($redirectUrl = $this->getRedirectUrl()) {
+            $this->redirect($redirectUrl);
+        }
+    }
+
     // Handles generation of the codec select fields
     private function makeCodecSelect(string $label, string $field, string $property): Forms\Components\Select
     {
