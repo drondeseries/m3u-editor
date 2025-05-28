@@ -2,15 +2,14 @@
 
 namespace App\Filament\Pages;
 
-use App\Settings\GeneralSettings;
-use App\Services\FfmpegCodecService; // Ensured
+use App\Settings\GeneralSettings; // Ensured
+use App\Services\FfmpegCodecService;
 use Filament\Forms;
 use Filament\Forms\Form;
-use Filament\Forms\Get; // Ensured
+use Filament\Forms\Get;
 use Filament\Notifications\Notification;
 use Filament\Pages\SettingsPage;
 use Filament\Support\Enums\MaxWidth;
-// Removed Forms\Components as it's an alias for Filament\Forms\Components
 
 class Preferences extends SettingsPage
 {
@@ -22,16 +21,9 @@ class Preferences extends SettingsPage
 
     protected static ?string $title = 'Settings';
 
-    // 1. Removed Class Properties for Codecs
-    // public array $videoCodecs = [];
-    // public array $audioCodecs = [];
-    // public array $subtitleCodecs = [];
-
-    // 2. Clean up mount() method
     public function mount(): void
     {
         parent::mount();
-        // Removed codec loading logic
     }
 
     public function form(Form $form): Form
@@ -51,14 +43,13 @@ class Preferences extends SettingsPage
                                     ->options([
                                         'left' => 'Left',
                                         'top' => 'Top',
-                                        // 'right' => 'Right', // Assuming this was intentionally removed from GeneralSettings as well
                                     ]),
                                 Forms\Components\Toggle::make('show_breadcrumbs')
                                     ->label('Show breadcrumbs')
                                     ->helperText('Show breadcrumbs under the page titles'),
                                 Forms\Components\Select::make('content_width')
                                     ->label('Max width of the page content')
-                                    ->options(MaxWidth::class), // Simplified from GeneralSettings
+                                    ->options(MaxWidth::class),
                             ]),
                         Forms\Components\Tabs\Tab::make('Proxy')
                             ->schema([
@@ -101,7 +92,6 @@ class Preferences extends SettingsPage
                                             ->placeholder('VLC/3.0.21 LibVLC/3.0.21')
                                             ->helperText('Fallback user agent (defaults to the streams Playlist user agent, when set).'),
 
-                                        // 3. Hardware Acceleration Selection
                                         Forms\Components\Select::make('hardware_acceleration_method')
                                             ->label('Hardware Acceleration')
                                             ->options([
@@ -109,55 +99,51 @@ class Preferences extends SettingsPage
                                                 'qsv' => 'Intel QSV',
                                                 'vaapi' => 'VA-API',
                                             ])
-                                            ->live() // Equivalent to reactive()
+                                            ->live()
                                             ->columnSpanFull()
                                             ->helperText('Choose the hardware acceleration method for FFmpeg.'),
 
-                                        // VA-API Fields
                                         Forms\Components\TextInput::make('ffmpeg_vaapi_device')
                                             ->label('VA-API Device Path')
                                             ->columnSpan('full')
                                             ->default('/dev/dri/renderD128')
                                             ->placeholder('/dev/dri/renderD128')
                                             ->helperText('e.g., /dev/dri/renderD128 or /dev/dri/card0')
-                                            ->visible(fn (Get $get) => $get('hardware_acceleration_method') === 'vaapi'), // 3. Conditional Visibility
+                                            ->visible(fn (Get $get) => $get('hardware_acceleration_method') === 'vaapi'),
                                         Forms\Components\TextInput::make('ffmpeg_vaapi_video_filter')
                                             ->label('VA-API Video Filter')
                                             ->columnSpan('full')
                                             ->default('scale_vaapi=format=nv12')
                                             ->placeholder('scale_vaapi=format=nv12')
                                             ->helperText("e.g., scale_vaapi=w=1280:h=720:format=nv12. Applied using -vf. Ensure 'format=' is usually nv12 or vaapi.")
-                                            ->visible(fn (Get $get) => $get('hardware_acceleration_method') === 'vaapi'), // 3. Conditional Visibility
+                                            ->visible(fn (Get $get) => $get('hardware_acceleration_method') === 'vaapi'),
 
-                                        // QSV Settings
                                         Forms\Components\TextInput::make('ffmpeg_qsv_device')
                                             ->label('QSV Device Path')
                                             ->columnSpan('full')
                                             ->placeholder('/dev/dri/renderD128')
                                             ->helperText('e.g., /dev/dri/renderD128. This is passed to init_hw_device.')
-                                            ->visible(fn (Get $get) => $get('hardware_acceleration_method') === 'qsv'), // 3. Conditional Visibility
+                                            ->visible(fn (Get $get) => $get('hardware_acceleration_method') === 'qsv'),
                                         Forms\Components\TextInput::make('ffmpeg_qsv_video_filter')
                                             ->label('QSV Video Filter (Optional)')
                                             ->columnSpan('full')
                                             ->placeholder('vpp_qsv=w=1280:h=720:format=nv12')
                                             ->helperText('e.g., vpp_qsv=w=1280:h=720:format=nv12 for scaling. Applied using -vf.')
-                                            ->visible(fn (Get $get) => $get('hardware_acceleration_method') === 'qsv'), // 3. Conditional Visibility
+                                            ->visible(fn (Get $get) => $get('hardware_acceleration_method') === 'qsv'),
                                         Forms\Components\Textarea::make('ffmpeg_qsv_encoder_options')
                                             ->label('QSV Encoder Options (Optional)')
                                             ->columnSpan('full')
                                             ->placeholder('e.g., -profile:v high -g 90 -look_ahead 1')
                                             ->helperText('Additional options for the h264_qsv (or hevc_qsv) encoder.')
                                             ->rows(3)
-                                            ->visible(fn (Get $get) => $get('hardware_acceleration_method') === 'qsv'), // 3. Conditional Visibility
+                                            ->visible(fn (Get $get) => $get('hardware_acceleration_method') === 'qsv'),
                                         Forms\Components\Textarea::make('ffmpeg_qsv_additional_args')
                                             ->label('Additional QSV Arguments (Optional)')
                                             ->columnSpan('full')
                                             ->placeholder('e.g., -low_power 1 for some QSV encoders')
                                             ->helperText('Advanced: Additional FFmpeg arguments specific to your QSV setup. Use with caution.')
                                             ->rows(3)
-                                            ->visible(fn (Get $get) => $get('hardware_acceleration_method') === 'qsv'), // 3. Conditional Visibility
-
-                                        // Removed old Toggle fields for vaapi_enabled and qsv_enabled
+                                            ->visible(fn (Get $get) => $get('hardware_acceleration_method') === 'qsv'),
 
                                         $this->makeCodecSelect('video', 'ffmpeg_codec_video', $form),
                                         $this->makeCodecSelect('audio', 'ffmpeg_codec_audio', $form),
@@ -280,44 +266,98 @@ class Preferences extends SettingsPage
             ]);
     }
 
-    // 3. Dynamic Codec Options in makeCodecSelect()
     private function makeCodecSelect(string $label, string $field, Form $form): Forms\Components\Select
     {
-        $configKey = "proxy.{$field}"; // Note: This seems to be for a different config system, not Laravel Settings.
-                                     // The settings are directly bound from GeneralSettings properties.
-        $configValue = config($configKey); // This will likely be null or not what's intended here.
-                                           // For GeneralSettings, values are auto-filled by Filament.
+        $configKey = "proxy.{$field}";
+        $configValue = config($configKey);
 
-        return Forms\Components\Select::make($field) // $field is 'ffmpeg_codec_video', etc.
+        return Forms\Components\Select::make($field)
             ->label(ucwords($label) . ' codec')
             ->helperText("Transcode {$label} streams to this codec.\nLeave blank to copy the original.")
-            ->allowHtml() // This might be an issue if codec names have HTML, ensure service provides clean labels.
+            ->allowHtml()
             ->searchable()
-            ->live() // Added live()
+            ->live()
             ->noSearchResultsMessage('No codecs found.')
-            ->options(function (Get $get) use ($label) { // $get is available here
-                $accelerationMethod = $get('hardware_acceleration_method'); // Get the current selection
+            ->options(function (Get $get) use ($label) {
+                $accelerationMethod = $get('hardware_acceleration_method');
                 switch ($label) {
                     case 'video':
                         return FfmpegCodecService::getVideoCodecs($accelerationMethod);
                     case 'audio':
-                        // Pass $accelerationMethod for consistency, though service might not use it for audio
                         return FfmpegCodecService::getAudioCodecs($accelerationMethod);
                     case 'subtitle':
-                        // Pass $accelerationMethod for consistency
                         return FfmpegCodecService::getSubtitleCodecs($accelerationMethod);
                     default:
                         return [];
                 }
             })
-            // ->getSearchResultsUsing(...) // Removed for now, rely on Filament's default for dynamic options
-            // ->getOptionLabelUsing(fn($value): ?string => $value) // Removed as service returns value => label
-            ->placeholder(fn() => empty($configValue) ? 'copy' : $configValue) // This placeholder logic might need review
-                                                                            // given the direct binding to GeneralSettings.
-                                                                            // GeneralSettings default is null.
+            ->placeholder(fn() => empty($configValue) ? 'copy' : $configValue)
             ->suffixIcon(fn() => !empty($configValue) ? 'heroicon-m-lock-closed' : null)
             ->disabled(fn() => !empty($configValue))
             ->hint(fn() => !empty($configValue) ? 'Already set by environment variable!' : null)
-            ->dehydrated(fn() => empty($configValue)); // Dehydration logic also tied to old config system.
+            ->dehydrated(fn() => empty($configValue));
+    }
+
+    protected function mutateFormDataBeforeSave(array $data): array
+    {
+        // Get all public properties defined in GeneralSettings
+        $defaultSettingsInstance = new GeneralSettings();
+        $allSettingKeys = array_keys(get_object_vars($defaultSettingsInstance));
+
+        foreach ($allSettingKeys as $key) {
+            if (!array_key_exists($key, $data)) {
+                // If a key defined in the Settings class is not in the submitted form data
+                // (e.g., because it was hidden), add it with its default value from the instance or null.
+                $data[$key] = $defaultSettingsInstance->{$key} ?? null;
+            }
+        }
+
+        // Explicitly ensure hardware_acceleration_method has a default if it's missing.
+        // The loop above should handle it if it's a public property with a default.
+        if (!isset($data['hardware_acceleration_method'])) {
+            $data['hardware_acceleration_method'] = 'none'; // Default from GeneralSettings
+        }
+
+        // Ensure that when a specific hardware acceleration is not selected,
+        // its related fields are explicitly set to null.
+        // The initial loop should set them to their defaults (which are null for these fields),
+        // this is an explicit safeguard if they were somehow submitted as empty strings or not at all.
+        if ($data['hardware_acceleration_method'] !== 'qsv') {
+            $data['ffmpeg_qsv_device'] = null;
+            $data['ffmpeg_qsv_video_filter'] = null;
+            $data['ffmpeg_qsv_encoder_options'] = null;
+            $data['ffmpeg_qsv_additional_args'] = null;
+        }
+
+        if ($data['hardware_acceleration_method'] !== 'vaapi') {
+            $data['ffmpeg_vaapi_device'] = null;
+            $data['ffmpeg_vaapi_video_filter'] = null;
+        }
+        
+        // Ensure other nullable fields that might be empty strings are actually null
+        $nullableTextfields = [
+            'ffmpeg_codec_video', 'ffmpeg_codec_audio', 'ffmpeg_codec_subtitles',
+            'ffmpeg_vaapi_device', 'ffmpeg_vaapi_video_filter',
+            'ffmpeg_qsv_device', 'ffmpeg_qsv_video_filter',
+            'ffmpeg_qsv_encoder_options', 'ffmpeg_qsv_additional_args',
+            'mediaflow_proxy_url', 'mediaflow_proxy_port', 'mediaflow_proxy_password',
+            'mediaflow_proxy_user_agent', 'ffmpeg_path'
+        ];
+
+        foreach ($nullableTextfields as $field) {
+            // Check if the field is set and is an empty string, or if it's not set but needs to be nullified
+            // based on hardware acceleration choices (already handled above for QSV/VAAPI).
+            // This loop primarily targets fields that might be submitted as "" from text inputs.
+            if (array_key_exists($field, $data) && $data[$field] === '') {
+                $data[$field] = null;
+            }
+        }
+        
+        // The commented-out lines for qsv/vaapi fields in the original mutate method
+        // (e.g., $data['ffmpeg_qsv_device'] = $data['ffmpeg_qsv_device'] ?? null;)
+        // were redundant if fields were already set to null by the logic above or by the initial loop.
+        // The current implementation directly sets them to null if the parent condition is not met.
+
+        return $data;
     }
 }
