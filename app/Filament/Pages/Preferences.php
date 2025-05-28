@@ -7,6 +7,7 @@ use App\Services\FfmpegCodecService;
 use Filament\Forms;
 use Filament\Forms\Form;
 use Filament\Forms\Get;
+use Filament\Forms\Set; // Added this line
 use Filament\Notifications\Notification;
 use Filament\Pages\SettingsPage;
 use Filament\Support\Enums\MaxWidth;
@@ -101,7 +102,21 @@ class Preferences extends SettingsPage
                                             ])
                                             ->live()
                                             ->columnSpanFull()
-                                            ->helperText('Choose the hardware acceleration method for FFmpeg.'),
+                                            ->helperText('Choose the hardware acceleration method for FFmpeg.')
+                                            ->afterStateUpdated(function (Get $get, Set $set, ?string $state) {
+                                                $currentVideoCodec = $get('ffmpeg_codec_video');
+                                                if ($currentVideoCodec === null) {
+                                                    return; // Nothing selected, nothing to invalidate
+                                                }
+
+                                                // $state is the new hardware_acceleration_method
+                                                $newValidCodecs = FfmpegCodecService::getVideoCodecs($state); 
+
+                                                if (!array_key_exists($currentVideoCodec, $newValidCodecs)) {
+                                                    // Reset to 'Copy Original' which is represented by an empty string
+                                                    $set('ffmpeg_codec_video', ''); 
+                                                }
+                                            }),
 
                                         Forms\Components\TextInput::make('ffmpeg_vaapi_device')
                                             ->label('VA-API Device Path')
