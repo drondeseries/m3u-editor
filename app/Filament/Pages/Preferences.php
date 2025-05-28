@@ -287,19 +287,26 @@ class Preferences extends SettingsPage
 
     protected function mutateFormStatesBeforeSave(array $data): array
     {
-        // If QSV is disabled via the form, we need to ensure the specific QSV settings fields
-        // (which would be hidden and thus absent from $data) are explicitly carried over
-        // with their current persisted values from $this->settings. This prevents the
-        // MissingSettings exception from spatie/laravel-settings.
-        if (!($data['ffmpeg_qsv_enabled'] ?? false)) {
-            // $this->settings refers to the loaded GeneralSettings instance for this page
-            $data['ffmpeg_qsv_device'] = $this->settings->ffmpeg_qsv_device;
-            $data['ffmpeg_qsv_video_filter'] = $this->settings->ffmpeg_qsv_video_filter;
-            $data['ffmpeg_qsv_encoder_options'] = $this->settings->ffmpeg_qsv_encoder_options;
-            $data['ffmpeg_qsv_additional_args'] = $this->settings->ffmpeg_qsv_additional_args;
-        }
-        // If QSV is enabled, $data will contain the values from the visible form fields,
-        // and those will be saved.
+        // Get the currently loaded settings instance for this page.
+        // This instance ($this->settings) holds the values as they were loaded from the DB
+        // or their defaults if never saved.
+        $currentSettingsValues = $this->settings;
+
+        // For each QSV detail field, ensure it's present in the $data array.
+        // If the key exists in $data (i.e., QSV toggle was ON, field was visible and submitted),
+        // its value from the form will be used.
+        // If the key does NOT exist in $data (i.e., QSV toggle was OFF, field was hidden),
+        // the current value from $currentSettingsValues (persisted or default) will be used.
+        // This guarantees the key is always passed to the settings->fill() method.
+
+        $data['ffmpeg_qsv_device'] = $data['ffmpeg_qsv_device'] ?? $currentSettingsValues->ffmpeg_qsv_device;
+        $data['ffmpeg_qsv_video_filter'] = $data['ffmpeg_qsv_video_filter'] ?? $currentSettingsValues->ffmpeg_qsv_video_filter;
+        $data['ffmpeg_qsv_encoder_options'] = $data['ffmpeg_qsv_encoder_options'] ?? $currentSettingsValues->ffmpeg_qsv_encoder_options;
+        
+        // Although 'ffmpeg_qsv_additional_args' was not reported in the error,
+        // applying the same pattern ensures consistency and safety for all
+        // conditionally hidden fields within this QSV group.
+        $data['ffmpeg_qsv_additional_args'] = $data['ffmpeg_qsv_additional_args'] ?? $currentSettingsValues->ffmpeg_qsv_additional_args;
 
         return $data;
     }
