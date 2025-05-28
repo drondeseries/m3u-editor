@@ -4,8 +4,11 @@ namespace App\Http\Controllers;
 
 use App\Models\FailoverChannel;
 use App\Models\Channel; // Used by the sources relationship
+use App\Models\Playlist; // Added for potential type hinting / clarity
+use App\Models\PlaylistProfile; // Added for clarity
 use App\Settings\GeneralSettings;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Redis; // Added for Redis
 use Illuminate\Support\Facades\Log;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 use Symfony\Component\Process\Process as SymfonyProcess; // Correctly aliased
@@ -53,6 +56,50 @@ class FailoverStreamController extends Controller
 
             $streamUrl = $sourceChannel->url_custom ?? $sourceChannel->url;
             $currentStreamTitle = strip_tags($sourceChannel->title_custom ?? $sourceChannel->title ?? $sourceChannel->name ?? "Source {$sourceChannel->id}");
+
+            // --- Playlist Profile Stream Limit Check START ---
+            $playlist = $sourceChannel->playlist;
+
+            if (!$playlist) {
+                Log::channel('ffmpeg')->error("Source channel {$sourceChannel->id} ({$currentStreamTitle}) has no associated playlist. Skipping.");
+                Redis::hmset("channel_metadata:" . $failoverChannel->id, ['state' => 'SWITCHING', 'state_change_time' => time()]);
+                Log::channel('ffmpeg')->info("FailoverStream: Set channel_metadata state to SWITCHING due to no playlist for FailoverChannel ID: {$failoverChannel->id}, Source ID: {$sourceChannel->id}");
+                continue;
+            }
+
+            // The defaultProfile() method already returns the first active default profile or null
+            $playlistProfile = $playlist->defaultProfile(); 
+
+            if (!$playlistProfile) { // Handles both null and potentially inactive if logic changes in defaultProfile()
+                Log::channel('ffmpeg')->info("Playlist {$playlist->name} (ID: {$playlist->id}) for source {$sourceChannel->id} has no active default profile. Skipping source.");
+                Redis::hmset("channel_metadata:" . $failoverChannel->id, ['state' => 'SWITCHING', 'state_change_time' => time()]);
+                Log::channel('ffmpeg')->info("FailoverStream: Set channel_metadata state to SWITCHING due to no active default profile for FailoverChannel ID: {$failoverChannel->id}, Source ID: {$sourceChannel->id}");
+                continue;
+            }
+            
+            // Check if is_active is explicitly false (though defaultProfile should handle this)
+            if (!$playlistProfile->is_active) {
+                Log::channel('ffmpeg')->info("Playlist profile {$playlistProfile->name} (ID: {$playlistProfile->id}) for playlist {$playlist->id} is not active. Skipping source {$sourceChannel->id}.");
+                Redis::hmset("channel_metadata:" . $failoverChannel->id, ['state' => 'SWITCHING', 'state_change_time' => time()]);
+                Log::channel('ffmpeg')->info("FailoverStream: Set channel_metadata state to SWITCHING due to inactive profile for FailoverChannel ID: {$failoverChannel->id}, Source ID: {$sourceChannel->id}");
+                continue;
+            }
+
+            if (isset($playlistProfile->max_streams)) {
+                $redisKey = "profile_connections:" . $playlistProfile->id;
+                $current_connections = (int) Redis::get($redisKey);
+
+                if ($current_connections >= $playlistProfile->max_streams) {
+                    Log::channel('ffmpeg')->warning("Playlist profile {$playlistProfile->name} (ID: {$playlistProfile->id}) has reached its maximum stream limit of {$playlistProfile->max_streams} connections. Current: {$current_connections}. Skipping source {$sourceChannel->id}.");
+                    Redis::hmset("channel_metadata:" . $failoverChannel->id, ['state' => 'SWITCHING', 'state_change_time' => time()]);
+                    Log::channel('ffmpeg')->info("FailoverStream: Set channel_metadata state to SWITCHING due to profile stream limit for FailoverChannel ID: {$failoverChannel->id}, Source ID: {$sourceChannel->id}");
+                    continue;
+                }
+                Log::channel('ffmpeg')->info("Playlist profile {$playlistProfile->name} (ID: {$playlistProfile->id}) connection check: {$current_connections} / {$playlistProfile->max_streams}. Proceeding with source {$sourceChannel->id}.");
+            } else {
+                Log::channel('ffmpeg')->info("Playlist profile {$playlistProfile->name} (ID: {$playlistProfile->id}) has no maximum stream limit defined. Proceeding with source {$sourceChannel->id}.");
+            }
+            // --- Playlist Profile Stream Limit Check END ---
             
             // --- FFprobe Pre-check START ---
             Log::channel('ffmpeg')->info("[PRE-CHECK] Attempting ffprobe for source: {$currentStreamTitle} (URL: {$streamUrl})");
@@ -84,17 +131,47 @@ class FailoverStreamController extends Controller
                 $precheckProcess->run();
                 if (!$precheckProcess->isSuccessful()) {
                     Log::channel('ffmpeg')->error("[PRE-CHECK] ffprobe failed for source [{$currentStreamTitle}]. Exit Code: " . $precheckProcess->getExitCode() . ". Error Output: " . $precheckProcess->getErrorOutput());
+                    Redis::hmset("channel_metadata:" . $failoverChannel->id, ['state' => 'SWITCHING', 'state_change_time' => time()]);
+                    Log::channel('ffmpeg')->info("FailoverStream: Set channel_metadata state to SWITCHING due to ffprobe failure for FailoverChannel ID: {$failoverChannel->id}, Source ID: {$sourceChannel->id}");
                     continue; // Try next source
                 }
                 Log::channel('ffmpeg')->info("[PRE-CHECK] ffprobe successful for source [{$currentStreamTitle}].");
             } catch (Exception $e) { // Catches ProcessTimedOutException, ProcessFailedException etc. from run()
                 Log::channel('ffmpeg')->error("[PRE-CHECK] ffprobe exception for source [{$currentStreamTitle}]: " . $e->getMessage());
+                Redis::hmset("channel_metadata:" . $failoverChannel->id, ['state' => 'SWITCHING', 'state_change_time' => time()]);
+                Log::channel('ffmpeg')->info("FailoverStream: Set channel_metadata state to SWITCHING due to ffprobe exception for FailoverChannel ID: {$failoverChannel->id}, Source ID: {$sourceChannel->id}");
                 continue; // Try next source
             }
             // --- FFprobe Pre-check END ---
 
             // Reset status for the main FFmpeg attempt, only if ffprobe passed
             $status = ['lowSpeedCount' => 0, 'processFailed' => false, 'clientAborted' => false];
+
+            // --- Successful Stream Start Redis State Updates START ---
+            Redis::set("channel_stream:" . $failoverChannel->id, $sourceChannel->id);
+            Redis::set("stream_profile:" . $sourceChannel->id, $playlistProfile->id); // Assuming $playlistProfile is the one confirmed for this stream
+            $metadata = [
+                'url' => $streamUrl, // Use the actual stream URL being used
+                'worker_id' => 'main', // Or a configurable ID
+                'stream_id' => $sourceChannel->id,
+                'm3u_profile_id' => $playlistProfile->id,
+                'state' => 'ACTIVE',
+                'last_switch_time' => time(),
+                'state_change_time' => time()
+            ];
+            Redis::hmset("channel_metadata:" . $failoverChannel->id, $metadata);
+            Log::channel('ffmpeg')->info("FailoverStream: Set Redis states for successful stream start. FailoverChannel ID: {$failoverChannel->id}, SourceChannel ID: {$sourceChannel->id}, Profile ID: {$playlistProfile->id}, Metadata: " . json_encode($metadata));
+            // --- Successful Stream Start Redis State Updates END ---
+
+            // --- Increment Playlist Profile Connection Counter START ---
+            $activeProfileIdForDecrement = null;
+            if ($playlistProfile && isset($playlistProfile->max_streams)) {
+                $redisKey = "profile_connections:" . $playlistProfile->id;
+                Redis::incr($redisKey);
+                Log::channel('ffmpeg')->info("Incremented profile_connections for profile ID: {$playlistProfile->id}. Current: " . Redis::get($redisKey));
+                $activeProfileIdForDecrement = $playlistProfile->id;
+            }
+            // --- Increment Playlist Profile Connection Counter END ---
             
             $ffmpegPath = $ffmpegCommandToExecute; // Use the resolved command for the main ffmpeg execution
 
@@ -146,7 +223,16 @@ class FailoverStreamController extends Controller
             // $status is now reset before this try block thanks to the pre-check logic above
 
             try {
-                return new StreamedResponse(function () use ($cmd, $currentStreamTitle, $failoverChannel, &$status) {
+                return new StreamedResponse(function () use ($cmd, $currentStreamTitle, $failoverChannel, &$status, $activeProfileIdForDecrement) {
+                    // Register shutdown function to decrement counter on script exit/abort
+                    register_shutdown_function(function () use ($activeProfileIdForDecrement) {
+                        if ($activeProfileIdForDecrement) {
+                            $redisKey = "profile_connections:" . $activeProfileIdForDecrement;
+                            Redis::decr($redisKey);
+                            Log::channel('ffmpeg')->info("Decremented profile_connections for profile ID: {$activeProfileIdForDecrement}. Current: " . Redis::get($redisKey));
+                        }
+                    });
+
                     ignore_user_abort(false);
                     while (ob_get_level()) ob_end_flush();
                     flush();
@@ -192,6 +278,8 @@ class FailoverStreamController extends Controller
 
                     if (!$process->isSuccessful() && !$status['clientAborted'] && !($process->getExitCode() === null && $process->isRunning())) {
                         Log::channel('ffmpeg')->error("FFmpeg process for source [{$currentStreamTitle}] was not successful. Exit code: " . $process->getExitCode() . ". Output: " . $process->getErrorOutput());
+                        Redis::hmset("channel_metadata:" . $failoverChannel->id, ['state' => 'SWITCHING', 'state_change_time' => time()]);
+                        Log::channel('ffmpeg')->info("FailoverStream: Set channel_metadata state to SWITCHING due to FFmpeg process failure for FailoverChannel ID: {$failoverChannel->id}");
                         $status['processFailed'] = true; 
                     }
                 }, 200, [
@@ -204,18 +292,35 @@ class FailoverStreamController extends Controller
 
             } catch (LowSpeedException $e) {
                 Log::channel('ffmpeg')->info("Low speed detected for source [{$currentStreamTitle}]. Trying next source for Failover Channel [{$failoverChannel->name}].");
+                Redis::hmset("channel_metadata:" . $failoverChannel->id, ['state' => 'SWITCHING', 'state_change_time' => time()]);
+                Log::channel('ffmpeg')->info("FailoverStream: Set channel_metadata state to SWITCHING due to LowSpeedException for FailoverChannel ID: {$failoverChannel->id}");
+                // No need to manually decrement here, shutdown function will handle it if $activeProfileIdForDecrement was set.
                 continue; 
             } catch (Exception $e) {
                 if ($e->getMessage() === "CLIENT_ABORTED_FAILOVER") {
                     Log::channel('ffmpeg')->info("Client aborted during stream of [{$currentStreamTitle}] for Failover Channel [{$failoverChannel->name}]. Stopping failover attempts.");
+                    Redis::hmset("channel_metadata:" . $failoverChannel->id, ['state' => 'CLIENT_ABORT', 'state_change_time' => time()]);
+                    Log::channel('ffmpeg')->info("FailoverStream: Set channel_metadata state to CLIENT_ABORT for FailoverChannel ID: {$failoverChannel->id}");
+                    // Shutdown function will handle decrement if $activeProfileIdForDecrement was set.
                     return response("Stream aborted by client.", 499); 
                 }
                 Log::channel('ffmpeg')->error("Error streaming source [{$currentStreamTitle}] for Failover Channel [{$failoverChannel->name}]: " . $e->getMessage());
+                Redis::hmset("channel_metadata:" . $failoverChannel->id, ['state' => 'SWITCHING', 'state_change_time' => time()]);
+                Log::channel('ffmpeg')->info("FailoverStream: Set channel_metadata state to SWITCHING due to general Exception for FailoverChannel ID: {$failoverChannel->id}, Source ID: {$sourceChannel->id}");
+                // No need to manually decrement here, shutdown function will handle it if $activeProfileIdForDecrement was set.
                 continue; 
             }
         }
 
         Log::channel('ffmpeg')->error("All sources for Failover Channel {$failoverChannel->name} failed.");
+        Redis::hmset("channel_metadata:" . $failoverChannel->id, [
+            'url' => '',
+            'stream_id' => '',
+            'm3u_profile_id' => '',
+            'state' => 'ERROR',
+            'state_change_time' => time()
+        ]);
+        Log::channel('ffmpeg')->info("FailoverStream: Set channel_metadata state to ERROR as all sources failed for FailoverChannel ID: {$failoverChannel->id}");
         return response("All sources failed or no suitable stream found.", 503); 
     }
     
@@ -312,6 +417,75 @@ class FailoverStreamController extends Controller
 
             $currentSource = $sources[$currentSourceIndex];
             $currentSourceChannelId = $currentSource['id']; // Update currentSourceChannelId
+
+            // --- Playlist Profile Stream Limit Check for HLS START ---
+            Log::channel('ffmpeg')->info("HLS Failover: Evaluating source {$currentSource['id']} ({$currentSource['title']}) at index {$currentSourceIndex} for profile limits.");
+            $sourceChannelModel = Channel::find($currentSource['id']);
+
+            if (!$sourceChannelModel) {
+                Log::channel('ffmpeg')->error("HLS Failover: Source channel model ID {$currentSource['id']} not found. Skipping.");
+                $currentSourceIndex++;
+                $sessionData = [
+                    'sources_list' => $sources,
+                    'current_source_index' => $currentSourceIndex,
+                    'current_source_channel_id' => ($currentSourceIndex < count($sources)) ? $sources[$currentSourceIndex]['id'] : null,
+                    'current_ffmpeg_pid' => null
+                ];
+                Cache::put($sessionCacheKey, $sessionData, now()->addHours(6));
+                return $this->serveHlsPlaylist($request, $failoverChannel);
+            }
+
+            $playlist = $sourceChannelModel->playlist;
+            if (!$playlist) {
+                Log::channel('ffmpeg')->error("HLS Failover: Playlist not found for source channel {$sourceChannelModel->id}. Skipping.");
+                $currentSourceIndex++;
+                $sessionData = [
+                    'sources_list' => $sources,
+                    'current_source_index' => $currentSourceIndex,
+                    'current_source_channel_id' => ($currentSourceIndex < count($sources)) ? $sources[$currentSourceIndex]['id'] : null,
+                    'current_ffmpeg_pid' => null
+                ];
+                Cache::put($sessionCacheKey, $sessionData, now()->addHours(6));
+                return $this->serveHlsPlaylist($request, $failoverChannel);
+            }
+
+            $playlistProfile = $playlist->defaultProfile();
+            if (!$playlistProfile || !$playlistProfile->is_active) {
+                Log::channel('ffmpeg')->info("HLS Failover: No active default profile for playlist {$playlist->name} (ID: {$playlist->id}). Skipping source {$sourceChannelModel->id}.");
+                $currentSourceIndex++;
+                $sessionData = [
+                    'sources_list' => $sources,
+                    'current_source_index' => $currentSourceIndex,
+                    'current_source_channel_id' => ($currentSourceIndex < count($sources)) ? $sources[$currentSourceIndex]['id'] : null,
+                    'current_ffmpeg_pid' => null
+                ];
+                Cache::put($sessionCacheKey, $sessionData, now()->addHours(6));
+                return $this->serveHlsPlaylist($request, $failoverChannel);
+            }
+
+            if (isset($playlistProfile->max_streams)) {
+                $redisKey = "profile_connections:" . $playlistProfile->id;
+                $current_connections = (int) Redis::get($redisKey);
+
+                if ($current_connections >= $playlistProfile->max_streams) {
+                    Log::channel('ffmpeg')->warning("HLS Failover: Playlist profile {$playlistProfile->name} (ID: {$playlistProfile->id}) at stream limit ({$playlistProfile->max_streams}). Current: {$current_connections}. Skipping source {$sourceChannelModel->id}.");
+                    $currentSourceIndex++;
+                    $sessionData = [
+                        'sources_list' => $sources,
+                        'current_source_index' => $currentSourceIndex,
+                        'current_source_channel_id' => ($currentSourceIndex < count($sources)) ? $sources[$currentSourceIndex]['id'] : null,
+                        'current_ffmpeg_pid' => null
+                    ];
+                    Cache::put($sessionCacheKey, $sessionData, now()->addHours(6));
+                    // This recursive call will re-evaluate based on the new currentSourceIndex
+                    return $this->serveHlsPlaylist($request, $failoverChannel);
+                }
+                Log::channel('ffmpeg')->info("HLS Failover: Playlist profile {$playlistProfile->name} (ID: {$playlistProfile->id}) connection check: {$current_connections} / {$playlistProfile->max_streams}. Proceeding with source {$sourceChannelModel->id}.");
+            } else {
+                Log::channel('ffmpeg')->info("HLS Failover: Playlist profile {$playlistProfile->name} (ID: {$playlistProfile->id}) has no max stream limit. Proceeding with source {$sourceChannelModel->id}.");
+            }
+            // --- Playlist Profile Stream Limit Check for HLS END ---
+
             Log::channel('ffmpeg')->info("HLS Failover: Attempting to start stream for new source {$currentSource['id']} ({$currentSource['title']}) at index {$currentSourceIndex} for {$failoverChannel->name}.");
 
             try {
@@ -326,9 +500,10 @@ class FailoverStreamController extends Controller
                     id: $currentSource['id'],
                     streamUrl: $currentSource['url'],
                     title: $currentSource['title'],
-                    userAgent: $currentSource['user_agent']
+                    userAgent: $currentSource['user_agent'],
+                    playlistProfileId: ($playlistProfile && $playlistProfile->is_active) ? $playlistProfile->id : null
                 );
-                Log::channel('ffmpeg')->info("HLS Failover: Successfully started FFmpeg (PID: {$pid}) for source {$currentSource['id']} for {$failoverChannel->name}.");
+                Log::channel('ffmpeg')->info("HLS Failover: Successfully started FFmpeg (PID: {$pid}) for source {$currentSource['id']} for {$failoverChannel->name}, with Profile ID: " . (($playlistProfile && $playlistProfile->is_active) ? $playlistProfile->id : 'None'));
             } catch (Exception $e) {
                 Log::channel('ffmpeg')->error("HLS Failover: Failed to start stream for source {$currentSource['id']} (Failover: {$failoverChannel->name}): " . $e->getMessage());
                 $pid = null; // Ensure pid is null if startStream failed

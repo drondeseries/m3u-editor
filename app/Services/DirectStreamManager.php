@@ -6,6 +6,7 @@ use Exception;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Redis;
 use Illuminate\Support\Facades\File;
+use App\Models\Channel;
 use Illuminate\Support\Facades\Storage;
 
 class DirectStreamManager
@@ -41,6 +42,41 @@ class DirectStreamManager
         $streamKey = "direct:stream:{$channelId}:{$format}";
         $pipePath = $this->getPipePath($channelId, $format);
 
+        // --- Playlist Profile Stream Limit Check START ---
+        $channel = Channel::find($channelId);
+        if (!$channel) {
+            Log::channel('ffmpeg')->error("DirectStream: Channel ID {$channelId} not found.");
+            throw new \Exception("Channel not found");
+        }
+
+        $playlist = $channel->playlist;
+        if (!$playlist) {
+            Log::channel('ffmpeg')->error("DirectStream: Playlist not found for channel {$channel->name} (ID: {$channelId}).");
+            throw new \Exception("Playlist not found for channel");
+        }
+
+        $playlistProfile = $playlist->defaultProfile();
+        if (!$playlistProfile || !$playlistProfile->is_active) {
+            Log::channel('ffmpeg')->error("DirectStream: No active default profile for playlist {$playlist->name} (ID: {$playlist->id}) associated with channel {$channelId}.");
+            throw new \Exception("No active profile for channel's playlist");
+        }
+
+        $activeProfileIdForStream = null; // To store the ID if limit checks pass and apply
+        if (isset($playlistProfile->max_streams)) {
+            $profileRedisKey = "profile_connections:" . $playlistProfile->id;
+            $current_connections = (int) Redis::get($profileRedisKey);
+
+            if ($current_connections >= $playlistProfile->max_streams) {
+                Log::channel('ffmpeg')->warning("DirectStream: Playlist profile {$playlistProfile->name} (ID: {$playlistProfile->id}) has reached its maximum stream limit of {$playlistProfile->max_streams}. Current: {$current_connections}.");
+                throw new \Exception("Playlist profile stream limit reached");
+            }
+            Log::channel('ffmpeg')->info("DirectStream: Playlist profile {$playlistProfile->name} (ID: {$playlistProfile->id}) connection check passed: {$current_connections} / {$playlistProfile->max_streams}.");
+            $activeProfileIdForStream = $playlistProfile->id; // This profile's limit will be used
+        } else {
+            Log::channel('ffmpeg')->info("DirectStream: Playlist profile {$playlistProfile->name} (ID: {$playlistProfile->id}) has no maximum stream limit defined.");
+        }
+        // --- Playlist Profile Stream Limit Check END ---
+
         // Create named pipe if it doesn't exist
         if (!file_exists($pipePath)) {
             $this->createNamedPipe($pipePath);
@@ -49,6 +85,12 @@ class DirectStreamManager
         // Check if ffmpeg is already running
         if (!$this->isProcessRunning($channelId, $format)) {
             $this->startFFmpegProcess($channelId, $format, $settings, $streamUrl, $userAgent, $pipePath);
+            // If startFFmpegProcess is successful and a profile limit applies, increment counter and store profile ID
+            if ($activeProfileIdForStream) {
+                Redis::incr("profile_connections:" . $activeProfileIdForStream);
+                Log::channel('ffmpeg')->info("DirectStream: Incremented profile_connections for profile ID: {$activeProfileIdForStream}. New count: " . Redis::get("profile_connections:" . $activeProfileIdForStream));
+                Redis::set("{$streamKey}:profile_id", $activeProfileIdForStream);
+            }
         }
 
         // Update last active timestamp
@@ -266,6 +308,18 @@ class DirectStreamManager
         }
 
         // Remove Redis keys
+        // --- Decrement Playlist Profile Connection Counter START ---
+        $profileIdKey = "{$streamKey}:profile_id";
+        $profileIdToDecrement = Redis::get($profileIdKey);
+        if ($profileIdToDecrement) {
+            $profileConnectionsKey = "profile_connections:" . $profileIdToDecrement;
+            Redis::decr($profileConnectionsKey);
+            Log::channel('ffmpeg')->info("DirectStream: Decremented profile_connections for profile ID: {$profileIdToDecrement}. New count: " . Redis::get($profileConnectionsKey));
+            Redis::del($profileIdKey);
+        }
+        // --- Decrement Playlist Profile Connection Counter END ---
+
+        // Remove other Redis keys
         Redis::del([
             "{$streamKey}:pid",
             "{$streamKey}:started_at",

@@ -40,6 +40,7 @@ class HlsStreamService
         $streamUrl,
         $title,
         $userAgent = null,
+        $playlistProfileId = null
     ): int {
         // Only start one FFmpeg per channel at a time
         $cacheKey = "hls:pid:{$type}:{$id}";
@@ -242,6 +243,14 @@ class HlsStreamService
             $pid = $status['pid'];
             Cache::forever("hls:pid:{$type}:{$id}", $pid);
 
+            // Handle PlaylistProfile connection counting
+            if ($playlistProfileId) {
+                $profileRedisKey = "profile_connections:" . $playlistProfileId;
+                Redis::incr($profileRedisKey);
+                Log::channel('ffmpeg')->info("HLS: Incremented profile_connections for profile ID: {$playlistProfileId}. Current: " . Redis::get($profileRedisKey));
+                Cache::forever("hls:profile_id:{$type}:{$id}", $playlistProfileId);
+            }
+
             // Record timestamp in Redis (never expires until we prune)
             Redis::set("hls:{$type}_last_seen:{$id}", now()->timestamp);
 
@@ -272,6 +281,17 @@ class HlsStreamService
                 // If the process is still running after SIGTERM, force kill it
                 posix_kill($pid, SIGKILL);
             }
+
+        // Handle PlaylistProfile connection counting
+        $profileIdCacheKey = "hls:profile_id:{$type}:{$id}";
+        $playlistProfileIdToDecrement = Cache::get($profileIdCacheKey);
+        if ($playlistProfileIdToDecrement) {
+            $profileRedisKey = "profile_connections:" . $playlistProfileIdToDecrement;
+            Redis::decr($profileRedisKey);
+            Log::channel('ffmpeg')->info("HLS: Decremented profile_connections for profile ID: {$playlistProfileIdToDecrement}. Current: " . Redis::get($profileRedisKey));
+        }
+        Cache::forget($profileIdCacheKey); // Always forget, even if it was null
+
             Cache::forget($cacheKey);
 
             // Cleanup on-disk HLS files

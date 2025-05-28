@@ -12,6 +12,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\MorphToMany;
+use App\Models\PlaylistProfile;
 
 class Playlist extends Model
 {
@@ -120,5 +121,24 @@ class Playlist extends Model
     public function episodes(): HasMany
     {
         return $this->hasMany(Episode::class);
+    }
+
+    /**
+     * Get the playlist profiles for the playlist.
+     */
+    public function playlistProfiles(): HasMany
+    {
+        return $this->hasMany(PlaylistProfile::class);
+    }
+
+    /**
+     * Get the default active playlist profile for the playlist.
+     */
+    public function defaultProfile(): ?PlaylistProfile
+    {
+        return $this->playlistProfiles()
+            ->where('is_default', true)
+            ->where('is_active', true)
+            ->first();
     }
 }
