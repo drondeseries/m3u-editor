@@ -321,8 +321,8 @@ class Preferences extends SettingsPage
         // Get the validated data from the form
         $data = $this->form->getState();
 
-        // Get the settings model instance correctly
-        $settingsInstance = $this->getSettings();
+        // Correctly get the settings model instance
+        $settingsInstance = $this->getSettingsRecord();
 
         // --- Custom logic to handle QSV fields ---
         // If QSV is disabled in the form, the specific QSV setting fields
@@ -341,7 +341,7 @@ class Preferences extends SettingsPage
         $this->callHook('beforeSave');
 
         // Fill the settings object with the (potentially modified) data and save,
-        // using the correct accessor for the settings instance.
+        // using the correctly obtained settings instance.
         $settingsInstance->fill($data);
         $settingsInstance->save();
 
