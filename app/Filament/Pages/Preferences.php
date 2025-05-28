@@ -285,6 +285,30 @@ class Preferences extends SettingsPage
             ]);
     }
 
+    protected function mutateFormStatesBeforeSave(array $data): array
+    {
+        // If QSV is disabled, we need to ensure the specific QSV settings fields
+        // are present in the data array with their current persisted values,
+        // otherwise spatie/laravel-settings will throw a MissingSettings exception
+        // for properties that are defined in GeneralSettings but not submitted by the form
+        // (because they were hidden).
+        if (!($data['ffmpeg_qsv_enabled'] ?? false)) {
+            $currentSettings = app(GeneralSettings::class);
+
+            // These are the fields that were reported in the MissingSettings error
+            $data['ffmpeg_qsv_device'] = $currentSettings->ffmpeg_qsv_device;
+            $data['ffmpeg_qsv_video_filter'] = $currentSettings->ffmpeg_qsv_video_filter;
+            $data['ffmpeg_qsv_encoder_options'] = $currentSettings->ffmpeg_qsv_encoder_options;
+            
+            // Although not in the error, it's good practice to also include other
+            // conditionally hidden fields for this group if they exist.
+            // In this case, ffmpeg_qsv_additional_args was also hidden.
+            $data['ffmpeg_qsv_additional_args'] = $currentSettings->ffmpeg_qsv_additional_args;
+        }
+
+        return $data;
+    }
+
     // Handles generation of the codec select fields
     private function makeCodecSelect(string $label, string $field, string $property): Forms\Components\Select
     {
