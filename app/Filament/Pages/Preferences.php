@@ -321,27 +321,29 @@ class Preferences extends SettingsPage
         // Get the validated data from the form
         $data = $this->form->getState();
 
+        // Get the settings model instance correctly
+        $settingsInstance = $this->getSettings();
+
         // --- Custom logic to handle QSV fields ---
         // If QSV is disabled in the form, the specific QSV setting fields
-        // (ffmpeg_qsv_device, etc.) would be hidden and thus absent from $data.
-        // We need to ensure they are present in the $data array with their current
-        // persisted values before filling and saving the settings object to prevent
-        // the MissingSettings error from spatie/laravel-settings.
+        // would be hidden and thus absent from $data. We need to ensure they
+        // are present in the $data array with their current persisted values
+        // before filling and saving the settings object.
         if (!($data['ffmpeg_qsv_enabled'] ?? false)) {
-            // $this->settings is the loaded GeneralSettings instance
-            $data['ffmpeg_qsv_device'] = $this->settings->ffmpeg_qsv_device;
-            $data['ffmpeg_qsv_video_filter'] = $this->settings->ffmpeg_qsv_video_filter;
-            $data['ffmpeg_qsv_encoder_options'] = $this->settings->ffmpeg_qsv_encoder_options;
-            $data['ffmpeg_qsv_additional_args'] = $this->settings->ffmpeg_qsv_additional_args;
+            $data['ffmpeg_qsv_device'] = $settingsInstance->ffmpeg_qsv_device;
+            $data['ffmpeg_qsv_video_filter'] = $settingsInstance->ffmpeg_qsv_video_filter;
+            $data['ffmpeg_qsv_encoder_options'] = $settingsInstance->ffmpeg_qsv_encoder_options;
+            $data['ffmpeg_qsv_additional_args'] = $settingsInstance->ffmpeg_qsv_additional_args;
         }
         // --- End custom logic ---
 
         // Call pre-save hook (standard Filament hook call)
         $this->callHook('beforeSave');
 
-        // Fill the settings object with the (potentially modified) data and save
-        $this->settings->fill($data);
-        $this->settings->save();
+        // Fill the settings object with the (potentially modified) data and save,
+        // using the correct accessor for the settings instance.
+        $settingsInstance->fill($data);
+        $settingsInstance->save();
 
         // Call post-save hook (standard Filament hook call)
         $this->callHook('afterSave');
