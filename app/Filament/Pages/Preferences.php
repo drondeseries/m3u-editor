@@ -298,66 +298,63 @@ class Preferences extends SettingsPage
             ->dehydrated(fn() => empty($configValue));
     }
 
-    protected function mutateFormDataBeforeSave(array $data): array
-    {
-        // Get all public properties defined in GeneralSettings
-        $defaultSettingsInstance = new GeneralSettings();
-        $allSettingKeys = array_keys(get_object_vars($defaultSettingsInstance));
+protected function mutateFormDataBeforeSave(array $data): array
+{
+    $settingsClass = static::$settings; // Gets App\Settings\GeneralSettings
+    $reflectionClass = new \ReflectionClass($settingsClass);
+    $definedProperties = $reflectionClass->getProperties(\ReflectionProperty::IS_PUBLIC);
 
-        foreach ($allSettingKeys as $key) {
-            if (!array_key_exists($key, $data)) {
-                // If a key defined in the Settings class is not in the submitted form data
-                // (e.g., because it was hidden), add it with its default value from the instance or null.
-                $data[$key] = $defaultSettingsInstance->{$key} ?? null;
-            }
+    // Ensure all defined settings are present in the data, using current values if not submitted
+    foreach ($definedProperties as $property) {
+        $propertyName = $property->getName();
+        if (!array_key_exists($propertyName, $data)) {
+            // If the property is not in the submitted form data (e.g., it was hidden),
+            // add its current value from the loaded settings ($this->settings).
+            // $this->settings is the already hydrated settings object.
+            $data[$propertyName] = $this->settings->{$propertyName};
         }
-
-        // Explicitly ensure hardware_acceleration_method has a default if it's missing.
-        // The loop above should handle it if it's a public property with a default.
-        if (!isset($data['hardware_acceleration_method'])) {
-            $data['hardware_acceleration_method'] = 'none'; // Default from GeneralSettings
-        }
-
-        // Ensure that when a specific hardware acceleration is not selected,
-        // its related fields are explicitly set to null.
-        // The initial loop should set them to their defaults (which are null for these fields),
-        // this is an explicit safeguard if they were somehow submitted as empty strings or not at all.
-        if ($data['hardware_acceleration_method'] !== 'qsv') {
-            $data['ffmpeg_qsv_device'] = null;
-            $data['ffmpeg_qsv_video_filter'] = null;
-            $data['ffmpeg_qsv_encoder_options'] = null;
-            $data['ffmpeg_qsv_additional_args'] = null;
-        }
-
-        if ($data['hardware_acceleration_method'] !== 'vaapi') {
-            $data['ffmpeg_vaapi_device'] = null;
-            $data['ffmpeg_vaapi_video_filter'] = null;
-        }
-        
-        // Ensure other nullable fields that might be empty strings are actually null
-        $nullableTextfields = [
-            'ffmpeg_codec_video', 'ffmpeg_codec_audio', 'ffmpeg_codec_subtitles',
-            'ffmpeg_vaapi_device', 'ffmpeg_vaapi_video_filter',
-            'ffmpeg_qsv_device', 'ffmpeg_qsv_video_filter',
-            'ffmpeg_qsv_encoder_options', 'ffmpeg_qsv_additional_args',
-            'mediaflow_proxy_url', 'mediaflow_proxy_port', 'mediaflow_proxy_password',
-            'mediaflow_proxy_user_agent', 'ffmpeg_path'
-        ];
-
-        foreach ($nullableTextfields as $field) {
-            // Check if the field is set and is an empty string, or if it's not set but needs to be nullified
-            // based on hardware acceleration choices (already handled above for QSV/VAAPI).
-            // This loop primarily targets fields that might be submitted as "" from text inputs.
-            if (array_key_exists($field, $data) && $data[$field] === '') {
-                $data[$field] = null;
-            }
-        }
-        
-        // The commented-out lines for qsv/vaapi fields in the original mutate method
-        // (e.g., $data['ffmpeg_qsv_device'] = $data['ffmpeg_qsv_device'] ?? null;)
-        // were redundant if fields were already set to null by the logic above or by the initial loop.
-        // The current implementation directly sets them to null if the parent condition is not met.
-
-        return $data;
     }
+
+    // Explicitly set QSV fields to null if QSV is not the selected hardware acceleration method.
+    // This is important if these fields were part of the form but are now hidden.
+    if (isset($data['hardware_acceleration_method']) && $data['hardware_acceleration_method'] !== 'qsv') {
+        $data['ffmpeg_qsv_device'] = null;
+        $data['ffmpeg_qsv_video_filter'] = null;
+        $data['ffmpeg_qsv_encoder_options'] = null;
+        $data['ffmpeg_qsv_additional_args'] = null;
+    }
+
+    // Explicitly set VAAPI fields to null if VA-API is not the selected method.
+    if (isset($data['hardware_acceleration_method']) && $data['hardware_acceleration_method'] !== 'vaapi') {
+        $data['ffmpeg_vaapi_device'] = null;
+        $data['ffmpeg_vaapi_video_filter'] = null;
+    }
+    
+    // Convert empty strings from text inputs to null for nullable fields.
+    // This should run after ensuring all keys are present.
+    $nullableTextfields = [
+        'ffmpeg_codec_video', 'ffmpeg_codec_audio', 'ffmpeg_codec_subtitles',
+        'ffmpeg_vaapi_device', 'ffmpeg_vaapi_video_filter',
+        'ffmpeg_qsv_device', 'ffmpeg_qsv_video_filter',
+        'ffmpeg_qsv_encoder_options', 'ffmpeg_qsv_additional_args',
+        'mediaflow_proxy_url', 'mediaflow_proxy_port', 'mediaflow_proxy_password',
+        'mediaflow_proxy_user_agent', 'ffmpeg_path'
+    ];
+
+    foreach ($nullableTextfields as $field) {
+        if (array_key_exists($field, $data) && $data[$field] === '') {
+            $data[$field] = null;
+        }
+    }
+
+    // Ensure 'hardware_acceleration_method' itself has a default if it was somehow missing
+    // (though the first loop should cover it if it's a public property).
+    if (!isset($data['hardware_acceleration_method'])) {
+        // Attempt to get class default, fallback to 'none'
+        $classDefaults = $reflectionClass->getDefaultProperties();
+        $data['hardware_acceleration_method'] = $classDefaults['hardware_acceleration_method'] ?? 'none';
+    }
+
+    return $data;
+}
 }
