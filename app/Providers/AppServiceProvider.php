@@ -38,6 +38,7 @@ use Dedoc\Scramble\Support\Generator\SecurityScheme;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\URL;
+use App\Console\Commands\SetupSqliteJobsCommand;
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -324,5 +325,11 @@ class AppServiceProvider extends ServiceProvider
 
         // Register the FFMpeg codec service
         $this->app->singleton(FfmpegCodecService::class);
+
+        if ($this->app->runningInConsole()) {
+            $this->commands([
+                SetupSqliteJobsCommand::class,
+            ]);
+        }
     }
 }
