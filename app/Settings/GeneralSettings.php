@@ -32,10 +32,8 @@ class GeneralSettings extends Settings
     public ?bool $mediaflow_proxy_playlist_user_agent = false;
     public ?string $ffmpeg_path = null;
     public ?string $hardware_acceleration_method = 'none';
-    // public bool $ffmpeg_vaapi_enabled = false;
     public ?string $ffmpeg_vaapi_device = null;
     public ?string $ffmpeg_vaapi_video_filter = null;
-    // public bool $ffmpeg_qsv_enabled = false;
     public ?string $ffmpeg_qsv_device = null;
     public ?string $ffmpeg_qsv_video_filter = null;
     public ?string $ffmpeg_qsv_encoder_options = null;

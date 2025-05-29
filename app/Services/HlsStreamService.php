@@ -48,106 +48,136 @@ class HlsStreamService
         if (!($this->isRunning($type, $id))) {
             // Get user preferences
             $userPreferences = app(GeneralSettings::class);
-            $settings = [
+            
+            // Existing $settings array with defaults
+            $baseSettings = [
                 'ffmpeg_debug' => false,
                 'ffmpeg_max_tries' => 3,
                 'ffmpeg_user_agent' => 'VLC/3.0.21 LibVLC/3.0.21',
-                'ffmpeg_codec_video' => 'libx264',
+                'ffmpeg_codec_video' => 'libx264', // Default, might be overridden by user
                 'ffmpeg_codec_audio' => 'aac',
                 'ffmpeg_codec_subtitles' => 'copy',
                 'ffmpeg_path' => 'jellyfin-ffmpeg',
-                // VA-API defaults should remain
-                'ffmpeg_vaapi_enabled' => false,
+                'hardware_acceleration_method' => 'none', // Default for the method itself
                 'ffmpeg_vaapi_device' => '/dev/dri/renderD128',
-                'ffmpeg_vaapi_video_filter' => 'scale_vaapi=format=nv12',
+                'ffmpeg_vaapi_video_filter' => 'scale_vaapi=format=nv12', // Note: this filter implies full hw pipeline
+                'ffmpeg_qsv_device' => '/dev/dri/renderD128',
+                'ffmpeg_qsv_video_filter' => 'vpp_qsv=format=nv12', // Note: this filter implies full hw pipeline
+                'ffmpeg_qsv_encoder_options' => null,
+                'ffmpeg_qsv_additional_args' => null,
             ];
-            try {
-                $settings = [
-                    'ffmpeg_debug' => $userPreferences->ffmpeg_debug ?? $settings['ffmpeg_debug'],
-                    'ffmpeg_max_tries' => $userPreferences->ffmpeg_max_tries ?? $settings['ffmpeg_max_tries'],
-                    'ffmpeg_user_agent' => $userPreferences->ffmpeg_user_agent ?? $settings['ffmpeg_user_agent'],
-                    'ffmpeg_codec_video' => $userPreferences->ffmpeg_codec_video ?? $settings['ffmpeg_codec_video'],
-                    'ffmpeg_codec_audio' => $userPreferences->ffmpeg_codec_audio ?? $settings['ffmpeg_codec_audio'],
-                    'ffmpeg_codec_subtitles' => $userPreferences->ffmpeg_codec_subtitles ?? $settings['ffmpeg_codec_subtitles'],
-                    'ffmpeg_path' => $userPreferences->ffmpeg_path ?? $settings['ffmpeg_path'],
-                    
-                    // VA-API settings
-                    'ffmpeg_vaapi_enabled' => $userPreferences->ffmpeg_vaapi_enabled ?? $settings['ffmpeg_vaapi_enabled'],
-                    'ffmpeg_vaapi_device' => $userPreferences->ffmpeg_vaapi_device ?? $settings['ffmpeg_vaapi_device'],
-                    'ffmpeg_vaapi_video_filter' => $userPreferences->ffmpeg_vaapi_video_filter ?? $settings['ffmpeg_vaapi_video_filter'],
 
-                    // QSV settings
-                    'ffmpeg_qsv_enabled' => $userPreferences->ffmpeg_qsv_enabled ?? false, // Default from GeneralSettings
-                    'ffmpeg_qsv_device' => $userPreferences->ffmpeg_qsv_device ?? '/dev/dri/renderD128', // Default from GeneralSettings
-                    'ffmpeg_qsv_video_filter' => $userPreferences->ffmpeg_qsv_video_filter ?? 'vpp_qsv=format=nv12', // Default from GeneralSettings
-                    'ffmpeg_qsv_encoder_options' => $userPreferences->ffmpeg_qsv_encoder_options ?? null, // Default from GeneralSettings
-                    'ffmpeg_qsv_additional_args' => $userPreferences->ffmpeg_qsv_additional_args ?? null, // Default from GeneralSettings
+            try {
+                // Override defaults with user preferences if they exist
+                $settings = [
+                    'ffmpeg_debug' => $userPreferences->ffmpeg_debug ?? $baseSettings['ffmpeg_debug'],
+                    'ffmpeg_max_tries' => $userPreferences->ffmpeg_max_tries ?? $baseSettings['ffmpeg_max_tries'],
+                    'ffmpeg_user_agent' => $userPreferences->ffmpeg_user_agent ?? $baseSettings['ffmpeg_user_agent'],
+                    'ffmpeg_codec_video' => $userPreferences->ffmpeg_codec_video ?? $baseSettings['ffmpeg_codec_video'],
+                    'ffmpeg_codec_audio' => $userPreferences->ffmpeg_codec_audio ?? $baseSettings['ffmpeg_codec_audio'],
+                    'ffmpeg_codec_subtitles' => $userPreferences->ffmpeg_codec_subtitles ?? $baseSettings['ffmpeg_codec_subtitles'],
+                    'ffmpeg_path' => $userPreferences->ffmpeg_path ?? $baseSettings['ffmpeg_path'],
+                    // Key change: Use hardware_acceleration_method from user preferences
+                    'hardware_acceleration_method' => $userPreferences->hardware_acceleration_method ?? $baseSettings['hardware_acceleration_method'],
+                    // VA-API specific device/filter settings
+                    'ffmpeg_vaapi_device' => $userPreferences->ffmpeg_vaapi_device ?? $baseSettings['ffmpeg_vaapi_device'],
+                    'ffmpeg_vaapi_video_filter' => $userPreferences->ffmpeg_vaapi_video_filter ?? $baseSettings['ffmpeg_vaapi_video_filter'],
+                    // QSV specific device/filter/options settings
+                    'ffmpeg_qsv_device' => $userPreferences->ffmpeg_qsv_device ?? $baseSettings['ffmpeg_qsv_device'],
+                    'ffmpeg_qsv_video_filter' => $userPreferences->ffmpeg_qsv_video_filter ?? $baseSettings['ffmpeg_qsv_video_filter'],
+                    'ffmpeg_qsv_encoder_options' => $userPreferences->ffmpeg_qsv_encoder_options ?? $baseSettings['ffmpeg_qsv_encoder_options'],
+                    'ffmpeg_qsv_additional_args' => $userPreferences->ffmpeg_qsv_additional_args ?? $baseSettings['ffmpeg_qsv_additional_args'],
                 ];
             } catch (Exception $e) {
-                // Ignore
+                // If $userPreferences isn't loaded or causes an error, fall back to baseSettings
+                $settings = $baseSettings;
+                Log::warning("HlsStreamService: Could not load user preferences for FFmpeg settings. Using defaults. Error: " . $e->getMessage());
             }
 
-            // Get user agent
-            if (!$userAgent) {
-                $userAgent = escapeshellarg($settings['ffmpeg_user_agent']);
-            }
+            // Get user agent (ensure it's properly escaped when used, or use the settings one)
+            // $escapedUserAgent = escapeshellarg($userAgent ?: $settings['ffmpeg_user_agent']);
+            // Using settings['ffmpeg_user_agent'] directly in the command construction later, will be escaped there.
 
             // Get ffmpeg path
-            $ffmpegPath = config('proxy.ffmpeg_path') ?: $settings['ffmpeg_path'];
-            if (empty($ffmpegPath)) {
-                $ffmpegPath = 'jellyfin-ffmpeg';
-            }
+            $ffmpegPath = config('proxy.ffmpeg_path') ?: ($settings['ffmpeg_path'] ?? 'jellyfin-ffmpeg');
 
-            // Get ffmpeg output codec formats
-            $codecFromConfig = config('proxy.ffmpeg_codec_video', null);
-            // $settings['ffmpeg_codec_video'] is already populated a few lines above this
-            $videoCodec = self::determineVideoCodec($codecFromConfig, $settings['ffmpeg_codec_video']);
-            $audioCodec = config('proxy.ffmpeg_codec_audio', null) ?: $settings['ffmpeg_codec_audio'];
-            $subtitleCodec = config('proxy.ffmpeg_codec_subtitles', null) ?: $settings['ffmpeg_codec_subtitles'];
+            // Determine the effective video codec based on config and settings
+            $finalVideoCodec = self::determineVideoCodec(
+                config('proxy.ffmpeg_codec_video', null), 
+                $settings['ffmpeg_codec_video'] ?? 'copy' // Default to 'copy' if not set
+            );
 
             // Initialize Hardware Acceleration and Codec Specific Argument Variables
-            $hwaccelInitArgs = '';
-            $hwaccelArgs = '';
-            $videoFilterArgs = '';
-            $codecSpecificArgs = ''; // For codec specific options like -profile:v
+            $hwaccelInitArgs = '';    // For -init_hw_device
+            $hwaccelInputArgs = '';   // For -hwaccel options before input (e.g., -hwaccel vaapi -hwaccel_output_format vaapi)
+            $videoFilterArgs = '';    // For -vf
+            $codecSpecificArgs = '';  // For encoder options like -profile:v, -preset, etc.
+            $outputVideoCodec = $finalVideoCodec; // This might be overridden by hw accel logic
 
-            // Get user defined general options (these might be appended to by hw accel logic)
+            // Get user defined general options from config/proxy.php
             $userArgs = config('proxy.ffmpeg_additional_args', '');
 
-            // Hardware Acceleration Logic
-            if ($settings['ffmpeg_vaapi_enabled'] ?? false) {
-                $videoCodec = 'h264_vaapi'; // Default VA-API H.264 encoder for HLS
-                $hwaccelInitArgs = "-init_hw_device vaapi=va_device:" . escapeshellarg($settings['ffmpeg_vaapi_device']) . " ";
-                $hwaccelArgs = "-hwaccel vaapi -hwaccel_device va_device -hwaccel_output_format vaapi ";
-                if (!empty($settings['ffmpeg_vaapi_video_filter'])) {
-                    $videoFilterArgs = "-vf '" . trim($settings['ffmpeg_vaapi_video_filter'], "'") . "' ";
+            // --- Hardware Acceleration Setup ---
+
+            // VA-API Settings from GeneralSettings
+            $vaapiEnabled = (($settings['hardware_acceleration_method'] ?? 'none') === 'vaapi');
+            $vaapiDevice = escapeshellarg($settings['ffmpeg_vaapi_device'] ?? '/dev/dri/renderD128');
+            $vaapiFilterFromSettings = $settings['ffmpeg_vaapi_video_filter'] ?? ''; 
+
+            // QSV Settings from GeneralSettings
+            $qsvEnabled = (($settings['hardware_acceleration_method'] ?? 'none') === 'qsv');
+            $qsvDevice = escapeshellarg($settings['ffmpeg_qsv_device'] ?? '/dev/dri/renderD128');
+            $qsvFilterFromSettings = $settings['ffmpeg_qsv_video_filter'] ?? ''; 
+            $qsvEncoderOptions = $settings['ffmpeg_qsv_encoder_options'] ?? null;
+            $qsvAdditionalArgs = $settings['ffmpeg_qsv_additional_args'] ?? null;
+
+            $isVaapiCodec = str_contains($finalVideoCodec, '_vaapi');
+            $isQsvCodec = str_contains($finalVideoCodec, '_qsv');
+
+            if ($vaapiEnabled || $isVaapiCodec) {
+                $outputVideoCodec = $isVaapiCodec ? $finalVideoCodec : 'h264_vaapi'; // Default to h264_vaapi if only toggle is on
+                
+                $hwaccelInitArgs = "-init_hw_device vaapi=va_device:{$vaapiDevice} ";
+                // These args are for full hardware acceleration (decode using VA-API)
+                $hwaccelInputArgs = "-hwaccel vaapi -hwaccel_device va_device -hwaccel_output_format vaapi ";
+                
+                if (!empty($vaapiFilterFromSettings)) {
+                    // This filter is applied to frames already in VA-API format
+                    $videoFilterArgs = "-vf '" . trim($vaapiFilterFromSettings, "'") . "' ";
                 }
-                // $codecSpecificArgs typically remains empty for VA-API HLS, unless specific encoder options are needed.
-            } elseif ($settings['ffmpeg_qsv_enabled'] ?? false) {
-                $videoCodec = 'h264_qsv'; // Default QSV H.264 encoder
-                $qsvDeviceName = 'qsv_hw'; // Internal handle for FFmpeg hw device
-                $hwaccelInitArgs = "-init_hw_device qsv={$qsvDeviceName}:" . escapeshellarg($settings['ffmpeg_qsv_device']) . " ";
-                $hwaccelArgs = "-hwaccel qsv -hwaccel_device {$qsvDeviceName} -hwaccel_output_format qsv ";
-                if (!empty($settings['ffmpeg_qsv_video_filter'])) {
-                    $videoFilterArgs = "-vf '" . trim($settings['ffmpeg_qsv_video_filter'], "'") . "' ";
+                // If $vaapiFilterFromSettings is empty, no -vf is added here for VA-API.
+                // FFmpeg will handle conversions if possible, or fail if direct path isn't supported.
+
+            } elseif ($qsvEnabled || $isQsvCodec) {
+                // Only apply QSV if VA-API wasn't chosen/enabled
+                $outputVideoCodec = $isQsvCodec ? $finalVideoCodec : 'h264_qsv'; // Default to h264_qsv
+                $qsvDeviceName = 'qsv_hw'; // Internal FFmpeg label
+                
+                $hwaccelInitArgs = "-init_hw_device qsv={$qsvDeviceName}:{$qsvDevice} ";
+                // These args are for full hardware acceleration (decode using QSV)
+                $hwaccelInputArgs = "-hwaccel qsv -hwaccel_device {$qsvDeviceName} -hwaccel_output_format qsv ";
+
+                if (!empty($qsvFilterFromSettings)) {
+                    // This filter is applied to frames already in QSV format
+                    $videoFilterArgs = "-vf '" . trim($qsvFilterFromSettings, "'") . "' ";
                 }
-                if (!empty($settings['ffmpeg_qsv_encoder_options'])) {
-                    $codecSpecificArgs = trim($settings['ffmpeg_qsv_encoder_options']) . " ";
+                if (!empty($qsvEncoderOptions)) {
+                    $codecSpecificArgs = trim($qsvEncoderOptions) . " ";
                 }
-                if (!empty($settings['ffmpeg_qsv_additional_args'])) {
-                    // Append QSV-specific additional args to the general userArgs
-                    // Ensure space separation if $userArgs already has content.
-                    $userArgs = trim($settings['ffmpeg_qsv_additional_args']) . ($userArgs ? " " . $userArgs : "");
+                if (!empty($qsvAdditionalArgs)) {
+                    $userArgs = trim($qsvAdditionalArgs) . ($userArgs ? " " . $userArgs : "");
                 }
             }
-            // If neither VA-API nor QSV is enabled, $videoCodec remains its default value (e.g., 'libx264'),
-            // and hwaccel/filter args remain empty.
+            // If neither VA-API nor QSV is applicable, $outputVideoCodec uses $finalVideoCodec (e.g. libx264 or copy)
+            // and $hwaccelInitArgs, $hwaccelInputArgs, $videoFilterArgs remain empty from hw accel logic.
 
-            // Update $outputFormat (must be after HW Accel logic)
-            // Ensure $codecSpecificArgs has a trailing space if it's not empty.
-            $outputFormat = "-c:v $videoCodec " . ($codecSpecificArgs ? trim($codecSpecificArgs) . " " : "") . "-c:a $audioCodec -bsf:a aac_adtstoasc -c:s $subtitleCodec";
+            // --- End Hardware Acceleration Setup ---
 
-            // Ensure $userArgs has a trailing space if not empty, before being used in the command
+            $audioCodec = config('proxy.ffmpeg_codec_audio', null) ?: ($settings['ffmpeg_codec_audio'] ?? 'copy');
+            $subtitleCodec = config('proxy.ffmpeg_codec_subtitles', null) ?: ($settings['ffmpeg_codec_subtitles'] ?? 'copy');
+
+            $outputFormat = "-c:v {$outputVideoCodec} " . ($codecSpecificArgs ? trim($codecSpecificArgs) . " " : "") . "-c:a {$audioCodec} -bsf:a aac_adtstoasc -c:s {$subtitleCodec}";
+
             if (!empty($userArgs)) {
                 $userArgs .= ' ';
             }
@@ -167,28 +197,26 @@ class HlsStreamService
                 ? url("/api/stream/{$id}") . '/'
                 : url("/api/stream/e/{$id}") . '/';
 
-            // Reconstruct FFmpeg Command
-            $cmd = $ffmpegPath . ' ';
-            $cmd .= $hwaccelInitArgs; 
-            $cmd .= $hwaccelArgs;     
+            // Reconstruct FFmpeg Command (ensure $ffmpegPath is escaped if it can contain spaces, though unlikely for a binary name)
+            $cmd = escapeshellcmd($ffmpegPath) . ' ';
+            $cmd .= $hwaccelInitArgs;  // e.g., -init_hw_device (goes before input options that use it, but after global options)
+            $cmd .= $hwaccelInputArgs; // e.g., -hwaccel vaapi (these must go BEFORE the -i input)
 
             $cmd .= '-fflags nobuffer -flags low_delay ';
 
-            // Pre-input HTTP options ($userAgent is already escaped from earlier logic):
-            $cmd .= "-user_agent ".$userAgent." -referer \"MyComputer\" " .
+            // Use the user agent from settings, escape it. $userAgent parameter is ignored for now.
+            $cmd .= "-user_agent " . escapeshellarg($settings['ffmpeg_user_agent']) . " -referer \"MyComputer\" " .
                     '-multiple_requests 1 -reconnect_on_network_error 1 ' .
                     '-reconnect_on_http_error 5xx,4xx,509 -reconnect_streamed 1 ' .
                     '-reconnect_delay_max 5 -noautorotate ';
 
-            $cmd .= $userArgs;
-            // $codecSpecificArgs is now part of $outputFormat
+            $cmd .= $userArgs; // User-defined global args from config/proxy.php or QSV additional args
 
             $cmd .= '-re -i ' . escapeshellarg($streamUrl) . ' ';
-            $cmd .= $videoFilterArgs; 
+            $cmd .= $videoFilterArgs; // e.g., -vf 'scale_vaapi=format=nv12' or -vf 'vpp_qsv=format=nv12'
             
-            // $cmd .= '-preset veryfast -g 15 -keyint_min 15 -sc_threshold 0 ';
             $cmd .= $outputFormat . ' ';
-
+            // ... rest of the HLS options and command suffix ...
             $cmd .= '-f hls -hls_time 2 -hls_list_size 6 ' .
                     '-hls_flags delete_segments+append_list+independent_segments ' .
                     '-use_wallclock_as_timestamps 1 ' .
