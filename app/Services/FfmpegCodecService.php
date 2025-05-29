@@ -91,4 +91,12 @@ class FfmpegCodecService
             'pgssub' => 'PGS Subtitles (Blu-ray/HD DVD)', // More descriptive
         ];
     }
+
+    public static function isHardwareVideoCodec(?string $codec): bool
+    {
+        if (empty($codec)) {
+            return false;
+        }
+        return str_contains($codec, '_qsv') || str_contains($codec, '_vaapi');
+    }
 }

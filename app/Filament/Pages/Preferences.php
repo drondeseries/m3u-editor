@@ -105,16 +105,25 @@ class Preferences extends SettingsPage
                                             ->helperText('Choose the hardware acceleration method for FFmpeg.')
                                             ->afterStateUpdated(function (Get $get, Set $set, ?string $state) {
                                                 $currentVideoCodec = $get('ffmpeg_codec_video');
-                                                if ($currentVideoCodec === null) {
-                                                    return; // Nothing selected, nothing to invalidate
-                                                }
 
-                                                // $state is the new hardware_acceleration_method
-                                                $newValidCodecs = FfmpegCodecService::getVideoCodecs($state); 
-
-                                                if (!array_key_exists($currentVideoCodec, $newValidCodecs)) {
-                                                    // Reset to 'Copy Original' which is represented by an empty string
-                                                    $set('ffmpeg_codec_video', ''); 
+                                                if ($state === 'none') {
+                                                    // If hardware acceleration is set to 'none',
+                                                    // check if the current video codec is a hardware-specific one.
+                                                    if ($currentVideoCodec && \App\Services\FfmpegCodecService::isHardwareVideoCodec($currentVideoCodec)) {
+                                                        // If it is, reset the video codec to 'Copy Original' (empty string).
+                                                        $set('ffmpeg_codec_video', '');
+                                                    }
+                                                } else {
+                                                    // If a specific hardware acceleration is chosen (qsv, vaapi),
+                                                    // or if the state is somehow null/unexpected (though 'none' covers empty state).
+                                                    if ($currentVideoCodec) { // Only proceed if a codec is actually set
+                                                        $newValidCodecs = \App\Services\FfmpegCodecService::getVideoCodecs($state);
+                                                        if (!array_key_exists($currentVideoCodec, $newValidCodecs)) {
+                                                            // If the current codec is not valid for the new hardware acceleration method,
+                                                            // reset it to 'Copy Original'.
+                                                            $set('ffmpeg_codec_video', '');
+                                                        }
+                                                    }
                                                 }
                                             }),
 
