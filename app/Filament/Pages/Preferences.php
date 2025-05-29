@@ -172,46 +172,6 @@ class Preferences extends SettingsPage
                                         $this->makeCodecSelect('video', 'ffmpeg_codec_video', $form),
                                         $this->makeCodecSelect('audio', 'ffmpeg_codec_audio', $form),
                                         $this->makeCodecSelect('subtitle', 'ffmpeg_codec_subtitles', $form),
-                                    ]),
-                                Forms\Components\Section::make('MediaFlow Proxy')
-                                    ->description('If you have MediaFlow Proxy installed, you can use it to proxy your m3u editor playlist streams. When enabled, the app will auto-generate URLs for you to use via MediaFlow Proxy.')
-                                    ->columnSpan('full')
-                                    ->columns(3)
-                                    ->headerActions([
-                                        Forms\Components\Actions\Action::make('mfproxy_git')
-                                            ->label('GitHub')
-                                            ->icon('heroicon-o-arrow-top-right-on-square')
-                                            ->iconPosition('after')
-                                            ->color('gray')
-                                            ->size('sm')
-                                            ->url('https://github.com/mhdzumair/mediaflow-proxy')
-                                            ->openUrlInNewTab(true)
-                                    ])
-                                    ->schema([
-                                        Forms\Components\TextInput::make('mediaflow_proxy_url')
-                                            ->label('URL')
-                                            ->columnSpan(1)
-                                            ->placeholder('http://localhost'),
-                                        Forms\Components\TextInput::make('mediaflow_proxy_port')
-                                            ->label('Port')
-                                            ->type('number')
-                                            ->columnSpan(1)
-                                            ->placeholder(8888),
-                                        Forms\Components\TextInput::make('mediaflow_proxy_password')
-                                            ->label('API Password')
-                                            ->columnSpan(1)
-                                            ->password()
-                                            ->revealable(),
-                                        Forms\Components\Toggle::make('mediaflow_proxy_playlist_user_agent')
-                                            ->label('Use playlist user agent')
-                                            ->inline(false)
-                                            ->live()
-                                            ->helperText('Appends the Playlist user agent. Disable to use a custom user agent for all requests.'),
-                                        Forms\Components\TextInput::make('mediaflow_proxy_user_agent')
-                                            ->label('User agent')
-                                            ->placeholder('VLC/3.0.21 LibVLC/3.0.21')
-                                            ->columnSpan(2)
-                                            ->hidden(fn(Get $get): bool => !!$get('mediaflow_proxy_playlist_user_agent')),
                                     ])
                             ]),
                         Forms\Components\Tabs\Tab::make('API')
@@ -325,6 +285,7 @@ class Preferences extends SettingsPage
 protected function mutateFormDataBeforeSave(array $data): array
 {
     $settingsClass = static::$settings; // Gets App\Settings\GeneralSettings
+    $loadedSettings = app($settingsClass); // Load settings instance directly
     $reflectionClass = new \ReflectionClass($settingsClass);
     $definedProperties = $reflectionClass->getProperties(\ReflectionProperty::IS_PUBLIC);
 
@@ -333,9 +294,8 @@ protected function mutateFormDataBeforeSave(array $data): array
         $propertyName = $property->getName();
         if (!array_key_exists($propertyName, $data)) {
             // If the property is not in the submitted form data (e.g., it was hidden),
-            // add its current value from the loaded settings ($this->settings).
-            // $this->settings is the already hydrated settings object.
-            $data[$propertyName] = $this->form->getModel()->{$propertyName};
+            // add its current value from the loaded settings.
+            $data[$propertyName] = $loadedSettings->{$propertyName};
         }
     }
 
