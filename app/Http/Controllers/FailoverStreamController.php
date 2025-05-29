@@ -23,6 +23,10 @@ class FailoverStreamController extends Controller
 {
     protected HlsStreamService $hlsService;
 
+    // Cache configuration for bad sources
+    private const BAD_SOURCE_CACHE_MINUTES = 5;
+    private const BAD_SOURCE_CACHE_PREFIX = 'failover:bad_source:';
+
     public function __construct(HlsStreamService $hlsStreamService)
     {
         $this->hlsService = $hlsStreamService;
@@ -49,6 +53,14 @@ class FailoverStreamController extends Controller
         $baseUserAgent = $settings['ffmpeg_user_agent']; 
 
         foreach ($sources as $sourceChannel) {
+            // --- Bad Source Cache Check START ---
+            $badSourceCacheKey = self::BAD_SOURCE_CACHE_PREFIX . $sourceChannel->id;
+            if (Redis::exists($badSourceCacheKey)) {
+                Log::channel('ffmpeg')->info("Skipping source ID {$sourceChannel->id} for Failover Channel {$failoverChannel->name} as it was recently marked as bad. Reason: " . (Redis::get($badSourceCacheKey) ?: 'N/A'));
+                continue;
+            }
+            // --- Bad Source Cache Check END ---
+
             $currentStreamUserAgent = $sourceChannel->playlist->user_agent ?? $baseUserAgent;
             $escapedUserAgent = escapeshellarg($currentStreamUserAgent);
 
@@ -133,13 +145,46 @@ class FailoverStreamController extends Controller
                     Log::channel('ffmpeg')->error("[PRE-CHECK] ffprobe failed for source [{$currentStreamTitle}]. Exit Code: " . $precheckProcess->getExitCode() . ". Error Output: " . $precheckProcess->getErrorOutput());
                     Redis::hmset("channel_metadata:" . $failoverChannel->id, ['state' => 'SWITCHING', 'state_change_time' => time()]);
                     Log::channel('ffmpeg')->info("FailoverStream: Set channel_metadata state to SWITCHING due to ffprobe failure for FailoverChannel ID: {$failoverChannel->id}, Source ID: {$sourceChannel->id}");
+                    // Add to bad source cache
+                    $cacheReason = "failed_ffprobe (Exit: " . $precheckProcess->getExitCode() . ")";
+                    Redis::setex($badSourceCacheKey, self::BAD_SOURCE_CACHE_MINUTES * 60, $cacheReason);
+                    Log::channel('ffmpeg')->info("Added source ID {$sourceChannel->id} to bad source cache for " . self::BAD_SOURCE_CACHE_MINUTES . " minutes due to ffprobe failure. Reason: {$cacheReason}");
                     continue; // Try next source
                 }
                 Log::channel('ffmpeg')->info("[PRE-CHECK] ffprobe successful for source [{$currentStreamTitle}].");
+
+                // --- Detailed ffprobe logging START ---
+                $ffprobeOutput = $precheckProcess->getOutput();
+                $streamInfo = json_decode($ffprobeOutput, true);
+
+                if (json_last_error() === JSON_ERROR_NONE && isset($streamInfo['streams'])) {
+                    foreach ($streamInfo['streams'] as $stream) {
+                        if (isset($stream['codec_type']) && $stream['codec_type'] === 'video') {
+                            $codecName = $stream['codec_name'] ?? 'N/A';
+                            $pixFmt = $stream['pix_fmt'] ?? 'N/A';
+                            $width = $stream['width'] ?? 'N/A';
+                            $height = $stream['height'] ?? 'N/A';
+                            $profile = $stream['profile'] ?? 'N/A';
+                            $level = $stream['level'] ?? 'N/A';
+                            Log::channel('ffmpeg')->info("[PRE-CHECK] Source [{$currentStreamTitle}] video stream: Codec: {$codecName}, Format: {$pixFmt}, Resolution: {$width}x{$height}, Profile: {$profile}, Level: {$level}");
+                            // Typically, we're interested in the first video stream.
+                            // If multiple video streams are possible and need specific handling, this loop can be adjusted.
+                            break; 
+                        }
+                    }
+                } else {
+                    Log::channel('ffmpeg')->warning("[PRE-CHECK] Could not decode ffprobe JSON output or no streams found for [{$currentStreamTitle}]. Output: " . $ffprobeOutput);
+                }
+                // --- Detailed ffprobe logging END ---
+
             } catch (Exception $e) { // Catches ProcessTimedOutException, ProcessFailedException etc. from run()
                 Log::channel('ffmpeg')->error("[PRE-CHECK] ffprobe exception for source [{$currentStreamTitle}]: " . $e->getMessage());
                 Redis::hmset("channel_metadata:" . $failoverChannel->id, ['state' => 'SWITCHING', 'state_change_time' => time()]);
                 Log::channel('ffmpeg')->info("FailoverStream: Set channel_metadata state to SWITCHING due to ffprobe exception for FailoverChannel ID: {$failoverChannel->id}, Source ID: {$sourceChannel->id}");
+                // Add to bad source cache
+                $cacheReason = "failed_ffprobe_exception (" . $e->getMessage() . ")";
+                Redis::setex($badSourceCacheKey, self::BAD_SOURCE_CACHE_MINUTES * 60, $cacheReason);
+                Log::channel('ffmpeg')->info("Added source ID {$sourceChannel->id} to bad source cache for " . self::BAD_SOURCE_CACHE_MINUTES . " minutes due to ffprobe exception. Reason: {$cacheReason}");
                 continue; // Try next source
             }
             // --- FFprobe Pre-check END ---
@@ -180,17 +225,25 @@ class FailoverStreamController extends Controller
             $videoFilterArgs = '';
             $codecSpecificArgs = '';
 
-            $videoCodec = $sourceChannel->video_codec_custom ?? $settings['ffmpeg_codec_video'];
             $audioCodec = $sourceChannel->audio_codec_custom ?? $settings['ffmpeg_codec_audio'];
             $subtitleCodec = $sourceChannel->subtitle_codec_custom ?? $settings['ffmpeg_codec_subtitles'];
 
-            if ($settings['ffmpeg_vaapi_enabled'] ?? false) {
-                $videoCodec = 'h264_vaapi';
+            // Initialize videoCodec, it will be set based on acceleration method
+            $videoCodec = ''; 
+
+            if (($settings['hardware_acceleration_method'] ?? 'none') === 'vaapi') {
+                $videoCodec = 'h264_vaapi'; // VAAPI specific codec
                 $hwaccelInitArgs = "-init_hw_device vaapi=va_device:{$settings['ffmpeg_vaapi_device']} ";
                 $hwaccelArgs = "-hwaccel vaapi -hwaccel_device va_device -hwaccel_output_format vaapi ";
                 if (!empty($settings['ffmpeg_vaapi_video_filter'])) {
-                    $videoFilterArgs = "-vf '" . trim($settings['ffmpeg_vaapi_video_filter'], "'") . "' ";
+                    // Ensure quotes are handled correctly if the filter string already contains them
+                    $trimmedFilter = trim($settings['ffmpeg_vaapi_video_filter'], "'\"");
+                    $videoFilterArgs = "-vf '" . $trimmedFilter . "' ";
                 }
+            } else {
+                // Logic for other acceleration methods or software encoding
+                $videoCodec = $sourceChannel->video_codec_custom ?? $settings['ffmpeg_codec_video'];
+                // Potentially add other hardware acceleration logic here (qsv, nvenc) if needed in the future
             }
 
             $outputFormatString = $format === 'ts'
@@ -280,7 +333,14 @@ class FailoverStreamController extends Controller
                         Log::channel('ffmpeg')->error("FFmpeg process for source [{$currentStreamTitle}] was not successful. Exit code: " . $process->getExitCode() . ". Output: " . $process->getErrorOutput());
                         Redis::hmset("channel_metadata:" . $failoverChannel->id, ['state' => 'SWITCHING', 'state_change_time' => time()]);
                         Log::channel('ffmpeg')->info("FailoverStream: Set channel_metadata state to SWITCHING due to FFmpeg process failure for FailoverChannel ID: {$failoverChannel->id}");
-                        $status['processFailed'] = true; 
+                        $status['processFailed'] = true;
+                        // Add to bad source cache if process failed and not client aborted
+                        if (!$status['clientAborted']) {
+                            $cacheReasonFfmpeg = "failed_ffmpeg (Exit: " . $process->getExitCode() . ")";
+                            $badSourceCacheKeyFfmpeg = self::BAD_SOURCE_CACHE_PREFIX . $sourceChannel->id; // Define key for this scope
+                            Redis::setex($badSourceCacheKeyFfmpeg, self::BAD_SOURCE_CACHE_MINUTES * 60, $cacheReasonFfmpeg);
+                            Log::channel('ffmpeg')->info("Added source ID {$sourceChannel->id} to bad source cache for " . self::BAD_SOURCE_CACHE_MINUTES . " minutes due to ffmpeg process failure. Reason: {$cacheReasonFfmpeg}");
+                        }
                     }
                 }, 200, [
                     'Content-Type' => $format === 'ts' ? 'video/MP2T' : 'video/mp4',
@@ -294,6 +354,11 @@ class FailoverStreamController extends Controller
                 Log::channel('ffmpeg')->info("Low speed detected for source [{$currentStreamTitle}]. Trying next source for Failover Channel [{$failoverChannel->name}].");
                 Redis::hmset("channel_metadata:" . $failoverChannel->id, ['state' => 'SWITCHING', 'state_change_time' => time()]);
                 Log::channel('ffmpeg')->info("FailoverStream: Set channel_metadata state to SWITCHING due to LowSpeedException for FailoverChannel ID: {$failoverChannel->id}");
+                // Add to bad source cache for low speed
+                $cacheReasonLowSpeed = "failed_ffmpeg_low_speed";
+                $badSourceCacheKeyLowSpeed = self::BAD_SOURCE_CACHE_PREFIX . $sourceChannel->id; // Define key
+                Redis::setex($badSourceCacheKeyLowSpeed, self::BAD_SOURCE_CACHE_MINUTES * 60, $cacheReasonLowSpeed);
+                Log::channel('ffmpeg')->info("Added source ID {$sourceChannel->id} to bad source cache for " . self::BAD_SOURCE_CACHE_MINUTES . " minutes due to low speed. Reason: {$cacheReasonLowSpeed}");
                 // No need to manually decrement here, shutdown function will handle it if $activeProfileIdForDecrement was set.
                 continue; 
             } catch (Exception $e) {
@@ -307,12 +372,17 @@ class FailoverStreamController extends Controller
                 Log::channel('ffmpeg')->error("Error streaming source [{$currentStreamTitle}] for Failover Channel [{$failoverChannel->name}]: " . $e->getMessage());
                 Redis::hmset("channel_metadata:" . $failoverChannel->id, ['state' => 'SWITCHING', 'state_change_time' => time()]);
                 Log::channel('ffmpeg')->info("FailoverStream: Set channel_metadata state to SWITCHING due to general Exception for FailoverChannel ID: {$failoverChannel->id}, Source ID: {$sourceChannel->id}");
+                // Add to bad source cache for general ffmpeg exceptions
+                $cacheReasonException = "failed_ffmpeg_exception (" . $e->getMessage() . ")";
+                $badSourceCacheKeyException = self::BAD_SOURCE_CACHE_PREFIX . $sourceChannel->id; // Define key
+                Redis::setex($badSourceCacheKeyException, self::BAD_SOURCE_CACHE_MINUTES * 60, $cacheReasonException);
+                Log::channel('ffmpeg')->info("Added source ID {$sourceChannel->id} to bad source cache for " . self::BAD_SOURCE_CACHE_MINUTES . " minutes due to ffmpeg exception. Reason: {$cacheReasonException}");
                 // No need to manually decrement here, shutdown function will handle it if $activeProfileIdForDecrement was set.
                 continue; 
             }
         }
 
-        Log::channel('ffmpeg')->error("All sources for Failover Channel {$failoverChannel->name} failed.");
+        Log::channel('ffmpeg')->error("All sources for Failover Channel {$failoverChannel->name} failed (or were skipped due to recent failures).");
         Redis::hmset("channel_metadata:" . $failoverChannel->id, [
             'url' => '',
             'stream_id' => '',
@@ -335,9 +405,10 @@ class FailoverStreamController extends Controller
             'ffmpeg_codec_audio' => 'copy',
             'ffmpeg_codec_subtitles' => 'copy',
             'ffmpeg_path' => 'jellyfin-ffmpeg',
-            'ffmpeg_vaapi_enabled' => false,
+            // 'ffmpeg_vaapi_enabled' => false, // Removed
+            'hardware_acceleration_method' => 'none', // Added
             'ffmpeg_vaapi_device' => '/dev/dri/renderD128',
-            'ffmpeg_vaapi_video_filter' => 'scale_vaapi=format=nv12',
+            'ffmpeg_vaapi_video_filter' => 'scale_vaapi=format=nv12', // Default, might be overwritten or conditionally changed
         ];
 
         try {
@@ -349,11 +420,17 @@ class FailoverStreamController extends Controller
                 'ffmpeg_codec_audio' => $userPreferences->ffmpeg_codec_audio ?? $settings['ffmpeg_codec_audio'],
                 'ffmpeg_codec_subtitles' => $userPreferences->ffmpeg_codec_subtitles ?? $settings['ffmpeg_codec_subtitles'],
                 'ffmpeg_path' => $userPreferences->ffmpeg_path ?? $settings['ffmpeg_path'],
-                'ffmpeg_vaapi_enabled' => $userPreferences->ffmpeg_vaapi_enabled ?? $settings['ffmpeg_vaapi_enabled'],
+                'hardware_acceleration_method' => $userPreferences->hardware_acceleration_method ?? $settings['hardware_acceleration_method'], // Fetched
                 'ffmpeg_vaapi_device' => $userPreferences->ffmpeg_vaapi_device ?? $settings['ffmpeg_vaapi_device'],
-                'ffmpeg_vaapi_video_filter' => $userPreferences->ffmpeg_vaapi_video_filter ?? $settings['ffmpeg_vaapi_video_filter'],
+                'ffmpeg_vaapi_video_filter' => $userPreferences->ffmpeg_vaapi_video_filter ?? $settings['ffmpeg_vaapi_video_filter'], // Fetched
             ];
             $settings['ffmpeg_additional_args'] = config('proxy.ffmpeg_additional_args', '');
+
+            // Apply conditional default for ffmpeg_vaapi_video_filter
+            if (($settings['hardware_acceleration_method'] ?? 'none') === 'vaapi' && empty($settings['ffmpeg_vaapi_video_filter'])) {
+                $settings['ffmpeg_vaapi_video_filter'] = 'scale_vaapi=format=nv12'; // Default VAAPI filter
+            }
+
         } catch (Exception $e) {
             Log::error("Error fetching stream settings: " . $e->getMessage());
         }
@@ -409,14 +486,30 @@ class FailoverStreamController extends Controller
             }
             $currentSourceIndex++;
 
-            if ($currentSourceIndex >= count($sources)) {
-                Cache::forget($sessionCacheKey);
-                Log::channel('ffmpeg')->error("HLS Failover: All sources exhausted for {$failoverChannel->name}.");
-                abort(503, "All HLS sources for Failover Channel {$failoverChannel->name} failed or are unavailable.");
+            // Loop to find the next valid, non-cached source
+            while ($currentSourceIndex < count($sources)) {
+                $currentSource = $sources[$currentSourceIndex];
+                $currentSourceChannelId = $currentSource['id'];
+
+                // --- Bad Source Cache Check for HLS START ---
+                $badSourceCacheKey = self::BAD_SOURCE_CACHE_PREFIX . $currentSourceChannelId;
+                if (Redis::exists($badSourceCacheKey)) {
+                    Log::channel('ffmpeg')->info("HLS Failover: Skipping source ID {$currentSourceChannelId} ({$currentSource['title']}) for Failover Channel {$failoverChannel->name} as it was recently marked as bad. Reason: " . (Redis::get($badSourceCacheKey) ?: 'N/A'));
+                    $currentSourceIndex++; // Move to next index
+                    $pid = null; // Ensure PID is null as we are skipping this source
+                    continue; // Re-evaluate the while condition with the new index
+                }
+                // --- Bad Source Cache Check for HLS END ---
+                break; // Found a non-cached source or exhausted list
             }
 
-            $currentSource = $sources[$currentSourceIndex];
-            $currentSourceChannelId = $currentSource['id']; // Update currentSourceChannelId
+            if ($currentSourceIndex >= count($sources) || $currentSource === null) {
+                Cache::forget($sessionCacheKey);
+                Log::channel('ffmpeg')->error("HLS Failover: All sources exhausted or skipped due to cache for {$failoverChannel->name}.");
+                abort(503, "All HLS sources for Failover Channel {$failoverChannel->name} failed, are unavailable, or recently failed.");
+            }
+            
+            // $currentSource and $currentSourceChannelId are now set to a non-cached source
 
             // --- Playlist Profile Stream Limit Check for HLS START ---
             Log::channel('ffmpeg')->info("HLS Failover: Evaluating source {$currentSource['id']} ({$currentSource['title']}) at index {$currentSourceIndex} for profile limits.");
@@ -506,15 +599,39 @@ class FailoverStreamController extends Controller
                 Log::channel('ffmpeg')->info("HLS Failover: Successfully started FFmpeg (PID: {$pid}) for source {$currentSource['id']} for {$failoverChannel->name}, with Profile ID: " . (($playlistProfile && $playlistProfile->is_active) ? $playlistProfile->id : 'None'));
             } catch (Exception $e) {
                 Log::channel('ffmpeg')->error("HLS Failover: Failed to start stream for source {$currentSource['id']} (Failover: {$failoverChannel->name}): " . $e->getMessage());
+                // Add to bad source cache
+                $badSourceCacheKeyFail = self::BAD_SOURCE_CACHE_PREFIX . $currentSource['id'];
+                $cacheReason = "failed_hls_startup (" . $e->getMessage() . ")";
+                Redis::setex($badSourceCacheKeyFail, self::BAD_SOURCE_CACHE_MINUTES * 60, $cacheReason);
+                Log::channel('ffmpeg')->info("HLS Failover: Added source ID {$currentSource['id']} to bad source cache for " . self::BAD_SOURCE_CACHE_MINUTES . " minutes due to HLS startStream failure. Reason: {$cacheReason}");
                 $pid = null; // Ensure pid is null if startStream failed
+
+                // Update session to reflect failure and allow quick retry of next source
+                $sessionData = [
+                    'sources_list' => $sources,
+                    'current_source_index' => $currentSourceIndex, // Keep current index, next request will increment
+                    'current_source_channel_id' => $currentSource['id'],
+                    'current_ffmpeg_pid' => null // Crucial: set PID to null
+                ];
+                Cache::put($sessionCacheKey, $sessionData, now()->addHours(6));
+                // Instead of aborting, let the client retry. The next request will try the next source due to PID being null.
+                // If all sources fail this way, it will eventually hit the "all sources exhausted" condition.
+                // However, to immediately try the next source in the list without waiting for another client request:
+                return $this->serveHlsPlaylist($request, $failoverChannel); // Recursive call to try next
             }
         }
         
-        // Update session state
+        // Update session state (ensure $currentSource is not null if we skipped all)
+        if ($currentSource === null) { // Should be caught by exhaustion check above, but as a safeguard
+            Log::channel('ffmpeg')->error("HLS Failover: Current source is null before updating session for {$failoverChannel->name}. This should not happen.");
+            Cache::forget($sessionCacheKey);
+            abort(503, "HLS playlist generation failed due to an unexpected error in source selection.");
+        }
+
         $sessionData = [
             'sources_list' => $sources,
             'current_source_index' => $currentSourceIndex,
-            'current_source_channel_id' => $currentSource['id'], // Use ID from the definitely assigned $currentSource
+            'current_source_channel_id' => $currentSource['id'],
             'current_ffmpeg_pid' => $pid
         ];
         Cache::put($sessionCacheKey, $sessionData, now()->addHours(6));
@@ -528,12 +645,21 @@ class FailoverStreamController extends Controller
                 $playlistReady = true;
                 break;
             }
-            if (!$this->hlsService->isRunning('channel', $currentSource['id'])) {
+            if (!$this->hlsService->isRunning('channel', $currentSource['id']) && $pid !== null) { // Ensure PID was set, meaning we tried to start it
                 Log::channel('ffmpeg')->error("HLS Failover: FFmpeg process (PID: {$pid}) for source {$currentSource['id']} died while waiting for playlist for {$failoverChannel->name}.");
-                // Clear PID from session so next request attempts failover
+                // Add to bad source cache
+                $badSourceCacheKeyDied = self::BAD_SOURCE_CACHE_PREFIX . $currentSource['id'];
+                $cacheReasonDied = "failed_hls_process_died_waiting_playlist";
+                Redis::setex($badSourceCacheKeyDied, self::BAD_SOURCE_CACHE_MINUTES * 60, $cacheReasonDied);
+                Log::channel('ffmpeg')->info("HLS Failover: Added source ID {$currentSource['id']} to bad source cache for " . self::BAD_SOURCE_CACHE_MINUTES . " minutes. Reason: {$cacheReasonDied}");
+
+                // Clear PID from session so next request attempts failover by trying the next source
                 $sessionData['current_ffmpeg_pid'] = null;
+                // $sessionData['current_source_index'] remains, next call will increment it.
                 Cache::put($sessionCacheKey, $sessionData, now()->addHours(6));
-                abort(503, "Playlist generation failed as stream ended prematurely. Please try again.");
+                // abort(503, "Playlist generation failed as stream ended prematurely. Please try again.");
+                // Instead of aborting, make a recursive call to try the next source immediately.
+                return $this->serveHlsPlaylist($request, $failoverChannel);
             }
             sleep(1);
         }
@@ -546,14 +672,27 @@ class FailoverStreamController extends Controller
                 'Cache-Control'     => 'no-cache, no-transform',
                 'Connection'        => 'keep-alive',
             ]);
-        } else {
-            if (!$this->hlsService->isRunning('channel', $currentSource['id'])) {
-                Log::channel('ffmpeg')->error("HLS Failover: Playlist not found and FFmpeg process (PID: {$pid}) for source {$currentSource['id']} is NOT running for {$failoverChannel->name}. Forcing re-evaluation.");
-                Cache::forget($sessionCacheKey); // Force re-evaluation on next request
-                abort(404, "Playlist not found for current source and process died.");
-            } else {
-                Log::channel('ffmpeg')->warning("HLS Failover: Playlist for source {$currentSource['id']} not ready after 10s for {$failoverChannel->name}, but FFmpeg (PID: {$pid}) still running. Client should retry.");
+        } else { // Playlist not ready after timeout
+            if (!$this->hlsService->isRunning('channel', $currentSource['id']) && $pid !== null) {
+                Log::channel('ffmpeg')->error("HLS Failover: Playlist not found AND FFmpeg process (PID: {$pid}) for source {$currentSource['id']} is NOT running for {$failoverChannel->name}. Forcing re-evaluation after caching.");
+                // Add to bad source cache
+                $badSourceCacheKeyNotReadyDied = self::BAD_SOURCE_CACHE_PREFIX . $currentSource['id'];
+                $cacheReasonNotReadyDied = "failed_hls_playlist_not_ready_process_died";
+                Redis::setex($badSourceCacheKeyNotReadyDied, self::BAD_SOURCE_CACHE_MINUTES * 60, $cacheReasonNotReadyDied);
+                Log::channel('ffmpeg')->info("HLS Failover: Added source ID {$currentSource['id']} to bad source cache for " . self::BAD_SOURCE_CACHE_MINUTES . " minutes. Reason: {$cacheReasonNotReadyDied}");
+                
+                // Clear the session to force a full re-evaluation, including re-fetching sources.
+                // This is a strong measure for when a source seems definitively broken.
+                Cache::forget($sessionCacheKey); 
+                abort(404, "Playlist not found for current source and process died. Please retry the main channel URL.");
+            } else if ($this->hlsService->isRunning('channel', $currentSource['id']) && $pid !== null) {
+                Log::channel('ffmpeg')->warning("HLS Failover: Playlist for source {$currentSource['id']} not ready after 10s for {$failoverChannel->name}, but FFmpeg (PID: {$pid}) still running. Client should retry the playlist URL.");
+                // Don't add to bad source cache here, as ffmpeg is still running, might be a temporary network issue for playlist segments.
                 abort(503, "Playlist not ready, please try again shortly.");
+            } else { // PID is null, means we never even started ffmpeg for this source (e.g. all prior sources cached)
+                 Log::channel('ffmpeg')->error("HLS Failover: Playlist not found and no FFmpeg PID for source {$currentSource['id']}. This indicates an issue with source selection logic or prior failures.");
+                 Cache::forget($sessionCacheKey);
+                 abort(500, "Error in HLS stream setup.");
             }
         }
     }

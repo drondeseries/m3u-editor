@@ -143,10 +143,14 @@ class HlsStreamService
                 
                 if (!empty($vaapiFilterFromSettings)) {
                     $videoFilterArgs = "-vf '" . trim($vaapiFilterFromSettings, "'") . "' ";
+                } elseif ($vaapiEnabled) { // Check if VAAPI is the selected hardware_acceleration_method
+                    // If VAAPI is the method and the user hasn't specified a filter, apply a default.
+                    $videoFilterArgs = "-vf 'scale_vaapi=format=nv12' "; 
                 } else {
-                    $videoFilterArgs = ""; // No default -vf filter
+                    // If VAAPI is not the selected method (e.g., it's 'none' or 'qsv') 
+                    // and no specific VAAPI filter was set, then no VAAPI-related -vf should be added.
+                    $videoFilterArgs = ""; 
                 }
-                // If $vaapiFilterFromSettings is empty, no -vf is added here for VA-API.
                 // FFmpeg will handle conversions if possible, or fail if direct path isn't supported.
 
             } elseif ($qsvEnabled || $isQsvCodec) {
