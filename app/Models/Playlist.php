@@ -13,6 +13,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\MorphToMany;
 use App\Models\PlaylistProfile;
+use Illuminate\Support\Facades\Log;
 
 class Playlist extends Model
 {
@@ -134,11 +135,28 @@ class Playlist extends Model
     /**
      * Get the default active playlist profile for the playlist.
      */
-    public function defaultProfile(): ?PlaylistProfile
+    public function defaultProfile(): PlaylistProfile // Changed return type hint
     {
-        return $this->playlistProfiles()
+        $profile = $this->playlistProfiles()
             ->where('is_default', true)
             ->where('is_active', true)
             ->first();
+
+        if ($profile) {
+            return $profile;
+        }
+
+        Log::info("No active default profile found for Playlist ID: {$this->id}. Creating one automatically.");
+
+        $newProfile = new PlaylistProfile([
+            'playlist_id' => $this->id,
+            'name' => 'Default Profile',
+            'max_streams' => 1,
+            'is_default' => true,
+            'is_active' => true,
+        ]);
+        $newProfile->save(); // save() will use UUIDs if HasUuids trait is on PlaylistProfile
+
+        return $newProfile;
     }
 }

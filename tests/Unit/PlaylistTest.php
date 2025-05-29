@@ -64,4 +64,84 @@ class PlaylistTest extends TestCase
         // 8. Assert that the is_active property of the returned profile is true
         $this->assertTrue($retrievedProfile->is_active);
     }
+
+    /** @test */
+    public function it_auto_creates_default_profile_if_none_exist()
+    {
+        Event::fake();
+        $playlist = Playlist::factory()->create();
+
+        $this->assertEquals(0, $playlist->playlistProfiles()->count()); // Ensure no profiles exist initially
+
+        $retrievedProfile = $playlist->defaultProfile();
+
+        $this->assertNotNull($retrievedProfile);
+        $this->assertEquals("Default Profile", $retrievedProfile->name);
+        $this->assertEquals(1, $retrievedProfile->max_streams);
+        $this->assertTrue($retrievedProfile->is_default);
+        $this->assertTrue($retrievedProfile->is_active);
+        $this->assertEquals($playlist->id, $retrievedProfile->playlist_id);
+        $this->assertDatabaseHas('playlist_profiles', [
+            'id' => $retrievedProfile->id,
+            'playlist_id' => $playlist->id,
+            'name' => 'Default Profile',
+            'is_default' => true,
+            'is_active' => true,
+        ]);
+        $this->assertEquals(1, $playlist->playlistProfiles()->count()); // Ensure one profile was created
+    }
+
+    /** @test */
+    public function it_auto_creates_default_profile_if_existing_default_is_inactive()
+    {
+        Event::fake();
+        $playlist = Playlist::factory()->create();
+
+        $inactiveDefaultProfile = PlaylistProfile::factory()
+            ->for($playlist)
+            ->isDefault()
+            ->inactive()
+            ->create();
+
+        $this->assertEquals(1, $playlist->playlistProfiles()->count());
+
+        $retrievedProfile = $playlist->defaultProfile();
+
+        $this->assertNotNull($retrievedProfile);
+        $this->assertNotEquals($inactiveDefaultProfile->id, $retrievedProfile->id);
+        $this->assertEquals("Default Profile", $retrievedProfile->name);
+        $this->assertTrue($retrievedProfile->is_default);
+        $this->assertTrue($retrievedProfile->is_active);
+        $this->assertEquals($playlist->id, $retrievedProfile->playlist_id);
+
+        $this->assertDatabaseHas('playlist_profiles', ['id' => $retrievedProfile->id, 'is_active' => true]);
+        $this->assertDatabaseHas('playlist_profiles', ['id' => $inactiveDefaultProfile->id, 'is_active' => false]);
+        $this->assertEquals(2, $playlist->playlistProfiles()->count());
+    }
+
+    /** @test */
+    public function it_auto_creates_default_profile_if_existing_active_is_not_default()
+    {
+        Event::fake();
+        $playlist = Playlist::factory()->create();
+
+        $activeNonDefaultProfile = PlaylistProfile::factory()
+            ->for($playlist)
+            ->create(['is_default' => false, 'is_active' => true]);
+
+        $this->assertEquals(1, $playlist->playlistProfiles()->count());
+
+        $retrievedProfile = $playlist->defaultProfile();
+
+        $this->assertNotNull($retrievedProfile);
+        $this->assertNotEquals($activeNonDefaultProfile->id, $retrievedProfile->id);
+        $this->assertEquals("Default Profile", $retrievedProfile->name);
+        $this->assertTrue($retrievedProfile->is_default);
+        $this->assertTrue($retrievedProfile->is_active);
+        $this->assertEquals($playlist->id, $retrievedProfile->playlist_id);
+
+        $this->assertDatabaseHas('playlist_profiles', ['id' => $retrievedProfile->id, 'is_default' => true, 'is_active' => true]);
+        $this->assertDatabaseHas('playlist_profiles', ['id' => $activeNonDefaultProfile->id, 'is_default' => false]);
+        $this->assertEquals(2, $playlist->playlistProfiles()->count());
+    }
 }
