@@ -335,7 +335,7 @@ protected function mutateFormDataBeforeSave(array $data): array
             // If the property is not in the submitted form data (e.g., it was hidden),
             // add its current value from the loaded settings ($this->settings).
             // $this->settings is the already hydrated settings object.
-            $data[$propertyName] = $this->record->{$propertyName};
+            $data[$propertyName] = $this->form->getModel()->{$propertyName};
         }
     }
 
