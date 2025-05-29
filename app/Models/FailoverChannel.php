@@ -9,9 +9,11 @@ use Spatie\Tags\HasTags;
 use Illuminate\Support\Str; // Added
 use App\Enums\ChannelLogoType; // Added
 
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+
 class FailoverChannel extends Model
 {
-    use HasTags;
+    use HasFactory, HasTags;
     protected $table = 'failover_channels';
 
     protected $fillable = [

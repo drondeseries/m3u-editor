@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
+use App\Models\FailoverChannel;
 use Illuminate\Support\Facades\Log;
 use Symfony\Component\Process\Process as SymphonyProcess;
 use Spatie\Tags\HasTags;
@@ -59,6 +60,11 @@ class Channel extends Model
     public function customPlaylists(): BelongsToMany
     {
         return $this->belongsToMany(CustomPlaylist::class, 'channel_custom_playlist');
+    }
+
+    public function failover_channels(): BelongsToMany
+    {
+        return $this->belongsToMany(FailoverChannel::class, 'failover_channel_sources', 'channel_id', 'failover_channel_id');
     }
 
     /**
