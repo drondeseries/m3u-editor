@@ -282,63 +282,72 @@ class Preferences extends SettingsPage
             ->dehydrated(fn() => empty($configValue));
     }
 
-protected function mutateFormDataBeforeSave(array $data): array
+protected function mutateFormDataBeforeSave(array $submittedFormData): array // Renamed parameter for clarity
 {
-    $settingsClass = static::$settings; // Gets App\Settings\GeneralSettings
-    $loadedSettings = app($settingsClass); // Load settings instance directly
-    $reflectionClass = new \ReflectionClass($settingsClass);
-    $definedProperties = $reflectionClass->getProperties(\ReflectionProperty::IS_PUBLIC);
+    $settingsClass = static::getSettings(); // Or static::$settings
+    $loadedSettings = app($settingsClass); // Instance of GeneralSettings with current values
 
-    // Ensure all defined settings are present in the data, using current values if not submitted
-    foreach ($definedProperties as $property) {
-        $propertyName = $property->getName();
-        if (!array_key_exists($propertyName, $data)) {
-            // If the property is not in the submitted form data (e.g., it was hidden),
-            // add its current value from the loaded settings.
-            $data[$propertyName] = $loadedSettings->{$propertyName};
+    // Start with all existing settings properties and their current values.
+    $finalData = $loadedSettings->toArray();
+
+    // Update with submitted data for fields that were part of the form
+    // AND are actual public properties of the settings class.
+    // This loop ensures we only consider keys that are valid settings properties.
+    $reflectionClass = new \ReflectionClass($settingsClass);
+    $publicProperties = [];
+    foreach ($reflectionClass->getProperties(\ReflectionProperty::IS_PUBLIC) as $property) {
+        $publicProperties[$property->getName()] = true;
+    }
+
+    foreach ($submittedFormData as $key => $value) {
+        if (isset($publicProperties[$key])) { // Check if submitted key is a defined public property
+            $finalData[$key] = $value;
         }
     }
 
-    // Explicitly set QSV fields to null if QSV is not the selected hardware acceleration method.
-    // This is important if these fields were part of the form but are now hidden.
-    if (isset($data['hardware_acceleration_method']) && $data['hardware_acceleration_method'] !== 'qsv') {
-        $data['ffmpeg_qsv_device'] = null;
-        $data['ffmpeg_qsv_video_filter'] = null;
-        $data['ffmpeg_qsv_encoder_options'] = null;
-        $data['ffmpeg_qsv_additional_args'] = null;
+    // Nullify QSV fields if QSV is not the selected hardware acceleration method.
+    // Use $finalData for checking 'hardware_acceleration_method' as it's now the complete picture.
+    if (isset($finalData['hardware_acceleration_method']) && $finalData['hardware_acceleration_method'] !== 'qsv') {
+        $finalData['ffmpeg_qsv_device'] = null;
+        $finalData['ffmpeg_qsv_video_filter'] = null;
+        $finalData['ffmpeg_qsv_encoder_options'] = null;
+        $finalData['ffmpeg_qsv_additional_args'] = null; // Ensure this is included
     }
 
-    // Explicitly set VAAPI fields to null if VA-API is not the selected method.
-    if (isset($data['hardware_acceleration_method']) && $data['hardware_acceleration_method'] !== 'vaapi') {
-        $data['ffmpeg_vaapi_device'] = null;
-        $data['ffmpeg_vaapi_video_filter'] = null;
+    // Nullify VAAPI fields if VA-API is not the selected method.
+    if (isset($finalData['hardware_acceleration_method']) && $finalData['hardware_acceleration_method'] !== 'vaapi') {
+        $finalData['ffmpeg_vaapi_device'] = null;
+        $finalData['ffmpeg_vaapi_video_filter'] = null;
     }
     
     // Convert empty strings from text inputs to null for nullable fields.
-    // This should run after ensuring all keys are present.
+    // This should run after ensuring all keys are present and conditional nulling is done.
     $nullableTextfields = [
         'ffmpeg_codec_video', 'ffmpeg_codec_audio', 'ffmpeg_codec_subtitles',
         'ffmpeg_vaapi_device', 'ffmpeg_vaapi_video_filter',
         'ffmpeg_qsv_device', 'ffmpeg_qsv_video_filter',
         'ffmpeg_qsv_encoder_options', 'ffmpeg_qsv_additional_args',
-        'mediaflow_proxy_url', 'mediaflow_proxy_port', 'mediaflow_proxy_password',
-        'mediaflow_proxy_user_agent', 'ffmpeg_path'
+        // mediaflow fields were removed, but if others exist that are text & nullable, add here
+        // 'mediaflow_proxy_url', 'mediaflow_proxy_port', 'mediaflow_proxy_password',
+        // 'mediaflow_proxy_user_agent', 
+        'ffmpeg_path'
     ];
 
     foreach ($nullableTextfields as $field) {
-        if (array_key_exists($field, $data) && $data[$field] === '') {
-            $data[$field] = null;
+        // Ensure the field exists in finalData before checking if it's an empty string.
+        // This is important because some fields (like QSV/VAAPI ones) might already be null.
+        if (array_key_exists($field, $finalData) && $finalData[$field] === '') {
+            $finalData[$field] = null;
         }
     }
-
+    
     // Ensure 'hardware_acceleration_method' itself has a default if it was somehow missing
-    // (though the first loop should cover it if it's a public property).
-    if (!isset($data['hardware_acceleration_method'])) {
-        // Attempt to get class default, fallback to 'none'
-        $classDefaults = $reflectionClass->getDefaultProperties();
-        $data['hardware_acceleration_method'] = $classDefaults['hardware_acceleration_method'] ?? 'none';
-    }
+    // from both loaded settings and submitted form data (highly unlikely for a form field).
+    // The initial $finalData = $loadedSettings->toArray() should cover this.
+    // If $loadedSettings didn't have it (e.g. fresh install, no defaults run), 
+    // it might still be an issue for Spatie settings if it's not nullable and has no default in the class.
+    // However, 'hardware_acceleration_method' has a default in GeneralSettings.php.
 
-    return $data;
+    return $finalData;
 }
 }
