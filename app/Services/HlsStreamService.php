@@ -60,7 +60,7 @@ class HlsStreamService
                 'ffmpeg_path' => 'jellyfin-ffmpeg',
                 'hardware_acceleration_method' => 'none', // Default for the method itself
                 'ffmpeg_vaapi_device' => '/dev/dri/renderD128',
-                'ffmpeg_vaapi_video_filter' => 'scale_vaapi=format=nv12', // Note: this filter implies full hw pipeline
+                'ffmpeg_vaapi_video_filter' => '', // Note: this filter implies full hw pipeline
                 'ffmpeg_qsv_device' => '/dev/dri/renderD128',
                 'ffmpeg_qsv_video_filter' => 'vpp_qsv=format=nv12', // Note: this filter implies full hw pipeline
                 'ffmpeg_qsv_encoder_options' => null,
@@ -137,13 +137,14 @@ class HlsStreamService
             if ($vaapiEnabled || $isVaapiCodec) {
                 $outputVideoCodec = $isVaapiCodec ? $finalVideoCodec : 'h264_vaapi'; // Default to h264_vaapi if only toggle is on
                 
-                $hwaccelInitArgs = "-init_hw_device vaapi=va_device:{$vaapiDevice} ";
+                $hwaccelInitArgs = "-init_hw_device vaapi=va_device:{$vaapiDevice} -filter_hw_device va_device:{$vaapiDevice} ";
                 // These args are for full hardware acceleration (decode using VA-API)
                 $hwaccelInputArgs = "-hwaccel vaapi -hwaccel_device va_device -hwaccel_output_format vaapi ";
                 
                 if (!empty($vaapiFilterFromSettings)) {
-                    // This filter is applied to frames already in VA-API format
                     $videoFilterArgs = "-vf '" . trim($vaapiFilterFromSettings, "'") . "' ";
+                } else {
+                    $videoFilterArgs = ""; // No default -vf filter
                 }
                 // If $vaapiFilterFromSettings is empty, no -vf is added here for VA-API.
                 // FFmpeg will handle conversions if possible, or fail if direct path isn't supported.

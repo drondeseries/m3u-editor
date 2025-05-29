@@ -172,6 +172,14 @@ class Preferences extends SettingsPage
                                         $this->makeCodecSelect('video', 'ffmpeg_codec_video', $form),
                                         $this->makeCodecSelect('audio', 'ffmpeg_codec_audio', $form),
                                         $this->makeCodecSelect('subtitle', 'ffmpeg_codec_subtitles', $form),
+
+                                        Forms\Components\Textarea::make('ffmpeg_custom_command_template')
+                                            ->label('Custom FFmpeg Command Template')
+                                            ->columnSpanFull()
+                                            ->nullable()
+                                            ->placeholder('e.g., {FFMPEG_PATH} -hwaccel vaapi -hwaccel_device /dev/dri/renderD128 -i {INPUT_URL} -vf "scale_vaapi=format=nv12" {OUTPUT_OPTIONS}')
+                                            ->rows(5)
+                                            ->helperText('Define a full FFmpeg command template. Use placeholders like {FFMPEG_PATH}, {INPUT_URL}, {OUTPUT_OPTIONS}, {USER_AGENT}, {REFERER}, {HWACCEL_INIT_ARGS}, {HWACCEL_ARGS}, {VIDEO_FILTER_ARGS}, {AUDIO_CODEC_ARGS}, {VIDEO_CODEC_ARGS}, {SUBTITLE_CODEC_ARGS}. If this field is filled, it will override most other FFmpeg settings. Leave empty to use the application-generated command. Use with caution: an improperly configured custom command can expose security vulnerabilities or cause instability.'),
                                     ])
                             ]),
                         Forms\Components\Tabs\Tab::make('API')
@@ -327,6 +335,7 @@ protected function mutateFormDataBeforeSave(array $submittedFormData): array // 
         'ffmpeg_vaapi_device', 'ffmpeg_vaapi_video_filter',
         'ffmpeg_qsv_device', 'ffmpeg_qsv_video_filter',
         'ffmpeg_qsv_encoder_options', 'ffmpeg_qsv_additional_args',
+        'ffmpeg_custom_command_template', // Added this line
         // mediaflow fields were removed, but if others exist that are text & nullable, add here
         // 'mediaflow_proxy_url', 'mediaflow_proxy_port', 'mediaflow_proxy_password',
         // 'mediaflow_proxy_user_agent', 

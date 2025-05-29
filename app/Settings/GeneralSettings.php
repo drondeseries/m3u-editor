@@ -38,6 +38,7 @@ class GeneralSettings extends Settings
     public ?string $ffmpeg_qsv_video_filter = null;
     public ?string $ffmpeg_qsv_encoder_options = null;
     public ?string $ffmpeg_qsv_additional_args = null;
+    public ?string $ffmpeg_custom_command_template = null;
 
     public static function group(): string
     {
