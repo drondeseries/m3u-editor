@@ -30,6 +30,7 @@ RUN apk update && apk --no-cache add \
     intel-media-driver \
     libva \
     libva-utils \
+    intel-media-sdk \
     # nginx + php-fpm
     nginx \
     php84-cli \
