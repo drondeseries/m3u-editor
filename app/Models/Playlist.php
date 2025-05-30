@@ -151,7 +151,7 @@ class Playlist extends Model
         $newProfile = new PlaylistProfile([
             'playlist_id' => $this->id,
             'name' => 'Default Profile',
-            'max_streams' => 1,
+            'max_streams' => $this->streams ?? 1, // Ensure a default if $this->streams is null
             'is_default' => true,
             'is_active' => true,
         ]);

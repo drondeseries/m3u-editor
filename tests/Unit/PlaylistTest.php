@@ -144,4 +144,59 @@ class PlaylistTest extends TestCase
         $this->assertDatabaseHas('playlist_profiles', ['id' => $activeNonDefaultProfile->id, 'is_default' => false]);
         $this->assertEquals(2, $playlist->playlistProfiles()->count());
     }
+
+    /** @test */
+    public function it_creates_new_default_profile_with_playlist_streams_value_when_streams_is_set()
+    {
+        Event::fake();
+        $playlist = Playlist::factory()->create(['streams' => 5]); // Set streams to 5
+
+        $this->assertEquals(0, $playlist->playlistProfiles()->count()); // Ensure no profiles exist initially
+
+        $retrievedProfile = $playlist->defaultProfile();
+
+        $this->assertNotNull($retrievedProfile);
+        $this->assertEquals("Default Profile", $retrievedProfile->name);
+        $this->assertEquals(5, $retrievedProfile->max_streams); // Assert max_streams is 5
+        $this->assertTrue($retrievedProfile->is_default);
+        $this->assertTrue($retrievedProfile->is_active);
+        $this->assertEquals($playlist->id, $retrievedProfile->playlist_id);
+        $this->assertDatabaseHas('playlist_profiles', [
+            'playlist_id' => $playlist->id,
+            'name' => 'Default Profile',
+            'max_streams' => 5,
+            'is_default' => true,
+            'is_active' => true,
+        ]);
+        $this->assertEquals(1, $playlist->playlistProfiles()->count());
+    }
+
+    /** @test */
+    public function it_returns_existing_default_profile_even_if_playlist_streams_value_is_different()
+    {
+        Event::fake();
+        $playlist = Playlist::factory()->create(['streams' => 10]); // Playlist streams set to 10
+
+        // Create an existing default, active PlaylistProfile with max_streams = 3
+        $existingProfile = PlaylistProfile::factory()->for($playlist)->isDefault()->create([
+            'is_active' => true,
+            'max_streams' => 3,
+        ]);
+
+        $this->assertEquals(1, $playlist->playlistProfiles()->count()); // Ensure one profile exists
+
+        $retrievedProfile = $playlist->defaultProfile();
+
+        $this->assertNotNull($retrievedProfile);
+        $this->assertEquals($existingProfile->id, $retrievedProfile->id); // Assert it's the existing profile
+        $this->assertEquals(3, $retrievedProfile->max_streams); // Assert max_streams is still 3, not 10
+        $this->assertTrue($retrievedProfile->is_default);
+        $this->assertTrue($retrievedProfile->is_active);
+
+        // Ensure the profile was not updated
+        $this->assertDatabaseHas('playlist_profiles', [
+            'id' => $existingProfile->id,
+            'max_streams' => 3,
+        ]);
+    }
 }
