@@ -27,6 +27,15 @@ class FailoverChannel extends Model
     ];
 
     /**
+     * The model's default values for attributes.
+     *
+     * @var array
+     */
+    protected $attributes = [
+        'speed_threshold' => 0.8,
+    ];
+
+    /**
      * The channels that are sources for this failover channel.
      */
     public function sources(): BelongsToMany

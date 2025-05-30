@@ -42,7 +42,7 @@ class FailoverChannelResource extends Resource
                     ->minValue(0.1)
                     ->maxValue(10.0)
                     ->step(0.1)
-                    ->default(0.9)
+                                    ->default(0.8)
                     ->helperText('If stream speed (e.g., 0.8x) falls below this, try next source.')
                     ->columnSpan('full'),
                 Forms\Components\Section::make('TVG Overrides (Optional)')

@@ -24,7 +24,7 @@ class FailoverStreamController extends Controller
     protected HlsStreamService $hlsService;
 
     // Cache configuration for bad sources
-    private const BAD_SOURCE_CACHE_MINUTES = 5;
+    private const BAD_SOURCE_CACHE_SECONDS = 10;
     private const BAD_SOURCE_CACHE_PREFIX = 'failover:bad_source:';
 
     public function __construct(HlsStreamService $hlsStreamService)
@@ -38,6 +38,12 @@ class FailoverStreamController extends Controller
             abort(400, 'Invalid format specified.');
         }
 
+        $hwaccelInitArgs = '';
+        $hwaccelDecodeArgs = ''; // For input decoding
+        $hwaccelEncodeArgs = ''; // For output encoding specifics beyond the codec itself
+        $videoFilterArgs = ''; 
+
+        $lowSpeedThresholdCount = config('proxy.ffmpeg_low_speed_count_threshold', 5);
         Log::channel('ffmpeg')->info("Attempting to stream Failover Channel: {$failoverChannel->name} (ID: {$failoverChannel->id})");
         // Sources are ordered by 'order' column in the pivot table via the model relationship
         $sources = $failoverChannel->sources()->get();
@@ -147,8 +153,8 @@ class FailoverStreamController extends Controller
                     Log::channel('ffmpeg')->info("FailoverStream: Set channel_metadata state to SWITCHING due to ffprobe failure for FailoverChannel ID: {$failoverChannel->id}, Source ID: {$sourceChannel->id}");
                     // Add to bad source cache
                     $cacheReason = "failed_ffprobe (Exit: " . $precheckProcess->getExitCode() . ")";
-                    Redis::setex($badSourceCacheKey, self::BAD_SOURCE_CACHE_MINUTES * 60, $cacheReason);
-                    Log::channel('ffmpeg')->info("Added source ID {$sourceChannel->id} to bad source cache for " . self::BAD_SOURCE_CACHE_MINUTES . " minutes due to ffprobe failure. Reason: {$cacheReason}");
+                    Redis::setex($badSourceCacheKey, self::BAD_SOURCE_CACHE_SECONDS, $cacheReason);
+                    Log::channel('ffmpeg')->info("Added source ID {$sourceChannel->id} to bad source cache for " . self::BAD_SOURCE_CACHE_SECONDS . " seconds due to ffprobe failure. Reason: {$cacheReason}");
                     continue; // Try next source
                 }
                 Log::channel('ffmpeg')->info("[PRE-CHECK] ffprobe successful for source [{$currentStreamTitle}].");
@@ -183,14 +189,19 @@ class FailoverStreamController extends Controller
                 Log::channel('ffmpeg')->info("FailoverStream: Set channel_metadata state to SWITCHING due to ffprobe exception for FailoverChannel ID: {$failoverChannel->id}, Source ID: {$sourceChannel->id}");
                 // Add to bad source cache
                 $cacheReason = "failed_ffprobe_exception (" . $e->getMessage() . ")";
-                Redis::setex($badSourceCacheKey, self::BAD_SOURCE_CACHE_MINUTES * 60, $cacheReason);
-                Log::channel('ffmpeg')->info("Added source ID {$sourceChannel->id} to bad source cache for " . self::BAD_SOURCE_CACHE_MINUTES . " minutes due to ffprobe exception. Reason: {$cacheReason}");
+                Redis::setex($badSourceCacheKey, self::BAD_SOURCE_CACHE_SECONDS, $cacheReason);
+                Log::channel('ffmpeg')->info("Added source ID {$sourceChannel->id} to bad source cache for " . self::BAD_SOURCE_CACHE_SECONDS . " seconds due to ffprobe exception. Reason: {$cacheReason}");
                 continue; // Try next source
             }
             // --- FFprobe Pre-check END ---
 
             // Reset status for the main FFmpeg attempt, only if ffprobe passed
-            $status = ['lowSpeedCount' => 0, 'processFailed' => false, 'clientAborted' => false];
+            $status = [
+                'lowSpeedCount' => 0,
+                'processFailed' => false,
+                'clientAborted' => false,
+                'speedReadings' => [] 
+            ];
 
             // --- Successful Stream Start Redis State Updates START ---
             Redis::set("channel_stream:" . $failoverChannel->id, $sourceChannel->id);
@@ -220,55 +231,79 @@ class FailoverStreamController extends Controller
             
             $ffmpegPath = $ffmpegCommandToExecute; // Use the resolved command for the main ffmpeg execution
 
+            // Reset per-source hwaccel args (already initialized at top of __invoke, but good for clarity in loop)
             $hwaccelInitArgs = '';
-            $hwaccelArgs = '';
+            $hwaccelDecodeArgs = '';
+            $hwaccelEncodeArgs = '';
             $videoFilterArgs = '';
-            $codecSpecificArgs = '';
+            $videoCodec = ''; // Will be determined below
 
+            $selectedHwAccel = $settings['hardware_acceleration_method'] ?? 'none';
+            // Assuming 'ffmpeg_codec_video_software' will be added to settings later. Default to 'libx264' for now.
+            $softwareVideoCodec = $sourceChannel->video_codec_custom ?? $settings['ffmpeg_codec_video_software'] ?? 'libx264';
+
+            if ($selectedHwAccel === 'vaapi') {
+                $videoCodec = 'h264_vaapi'; // Or hevc_vaapi if source is HEVC - future improvement
+                $hwaccelInitArgs = "-init_hw_device vaapi=va_device:{$settings['ffmpeg_vaapi_device']} ";
+                $hwaccelDecodeArgs = "-hwaccel vaapi -hwaccel_device va_device -hwaccel_output_format vaapi "; // Used for input
+                // $hwaccelEncodeArgs = ""; // h264_vaapi itself handles encoding specifics
+                if (!empty($settings['ffmpeg_vaapi_video_filter'])) {
+                    $trimmedFilter = trim($settings['ffmpeg_vaapi_video_filter'], "'\"");
+                    // Ensure format=vaapi for hw upload if filters are applied, and hwmap to derive device context
+                    $videoFilterArgs = "-vf '" . $trimmedFilter . ",hwmap=derive_device=vaapi,format=vaapi' "; 
+                } else {
+                    // Basic filter to keep pipeline on GPU and ensure output is vaapi surface
+                    $videoFilterArgs = "-vf 'hwmap=derive_device=vaapi,format=vaapi' "; 
+                }
+            } elseif ($selectedHwAccel === 'qsv') {
+                $videoCodec = 'h264_qsv'; 
+                $hwaccelInitArgs = "-init_hw_device qsv=hw -filter_hw_device hw "; 
+                $hwaccelDecodeArgs = "-hwaccel qsv -hwaccel_output_format qsv "; 
+                // $hwaccelEncodeArgs = "-load_plugin hevc_hw"; 
+                // Example QSV filter: $videoFilterArgs = "-vf 'scale_qsv=w=1280:h=720' ";
+            } elseif ($selectedHwAccel === 'nvenc') {
+                $videoCodec = 'h264_nvenc'; 
+                $hwaccelDecodeArgs = "-hwaccel cuda -hwaccel_output_format cuda "; 
+                // $hwaccelEncodeArgs = ""; 
+                // Example NVENC filter: $videoFilterArgs = "-vf 'scale_cuda=1280:720' ";
+            } else { // 'none' or unrecognised
+                $videoCodec = $softwareVideoCodec; 
+                // All hwaccel args remain empty
+            }
+            
+            // Audio and Subtitle codecs determined here, before $cmd construction
             $audioCodec = $sourceChannel->audio_codec_custom ?? $settings['ffmpeg_codec_audio'];
             $subtitleCodec = $sourceChannel->subtitle_codec_custom ?? $settings['ffmpeg_codec_subtitles'];
 
-            // Initialize videoCodec, it will be set based on acceleration method
-            $videoCodec = ''; 
-
-            if (($settings['hardware_acceleration_method'] ?? 'none') === 'vaapi') {
-                $videoCodec = 'h264_vaapi'; // VAAPI specific codec
-                $hwaccelInitArgs = "-init_hw_device vaapi=va_device:{$settings['ffmpeg_vaapi_device']} ";
-                $hwaccelArgs = "-hwaccel vaapi -hwaccel_device va_device -hwaccel_output_format vaapi ";
-                if (!empty($settings['ffmpeg_vaapi_video_filter'])) {
-                    // Ensure quotes are handled correctly if the filter string already contains them
-                    $trimmedFilter = trim($settings['ffmpeg_vaapi_video_filter'], "'\"");
-                    $videoFilterArgs = "-vf '" . $trimmedFilter . "' ";
-                }
-            } else {
-                // Logic for other acceleration methods or software encoding
-                $videoCodec = $sourceChannel->video_codec_custom ?? $settings['ffmpeg_codec_video'];
-                // Potentially add other hardware acceleration logic here (qsv, nvenc) if needed in the future
-            }
-
-            $outputFormatString = $format === 'ts'
-                ? "-c:v $videoCodec -c:a $audioCodec -c:s $subtitleCodec -f mpegts pipe:1"
-                : "-c:v $videoCodec -ac 2 -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof pipe:1";
-            
-            $userArgs = $settings['ffmpeg_additional_args'] ?? '';
-            if (!empty($userArgs) && substr($userArgs, -1) !== ' ') $userArgs .= ' ';
-
+            // Start $cmd construction (this is Step 3 from the plan)
             $cmd = $ffmpegPath . ' ';
-            $cmd .= $hwaccelInitArgs;
-            $cmd .= $hwaccelArgs;
+            $cmd .= $hwaccelInitArgs; 
+            
             $cmd .= "-user_agent ".$escapedUserAgent." -referer \"MyComputer\" " .
                     '-multiple_requests 1 -reconnect_on_network_error 1 ' .
                     '-reconnect_on_http_error 5xx,4xx,509 -reconnect_streamed 1 ' .
-                    '-reconnect_delay_max 5';
+                    '-reconnect_delay_max 5 ';
+            
+            $cmd .= $hwaccelDecodeArgs; 
+
             if (stripos($streamUrl, '.mkv') !== false) {
                 $cmd .= ' -analyzeduration 10M -probesize 10M';
             }
             $cmd .= ' -noautorotate ';
+            
+            $userArgs = $settings['ffmpeg_additional_args'] ?? '';
+            if (!empty($userArgs) && substr($userArgs, -1) !== ' ') $userArgs .= ' ';
             $cmd .= $userArgs;
-            $cmd .= $codecSpecificArgs;
+
             $cmd .= '-re -i ' . escapeshellarg($streamUrl) . ' ';
-            $cmd .= $videoFilterArgs;
-            $cmd .= $outputFormatString;
+            $cmd .= $videoFilterArgs; 
+            
+            if ($format === 'ts') {
+                $cmd .= "-c:v $videoCodec $hwaccelEncodeArgs -c:a $audioCodec -c:s $subtitleCodec -f mpegts pipe:1";
+            } else { // mp4
+                $cmd .= "-c:v $videoCodec $hwaccelEncodeArgs -c:a $audioCodec -ac 2 -c:s $subtitleCodec -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof pipe:1";
+            }
+            
             $cmd .= ($settings['ffmpeg_debug'] ? ' -loglevel verbose' : ' -hide_banner -loglevel error');
 
             Log::channel('ffmpeg')->info("Executing FFmpeg for source [{$currentStreamTitle}]: {$cmd}");
@@ -276,7 +311,7 @@ class FailoverStreamController extends Controller
             // $status is now reset before this try block thanks to the pre-check logic above
 
             try {
-                return new StreamedResponse(function () use ($cmd, $currentStreamTitle, $failoverChannel, &$status, $activeProfileIdForDecrement) {
+                return new StreamedResponse(function () use ($cmd, $currentStreamTitle, $failoverChannel, &$status, $activeProfileIdForDecrement, $lowSpeedThresholdCount, $sourceChannel) {
                     // Register shutdown function to decrement counter on script exit/abort
                     register_shutdown_function(function () use ($activeProfileIdForDecrement) {
                         if ($activeProfileIdForDecrement) {
@@ -295,7 +330,8 @@ class FailoverStreamController extends Controller
                     $process = SymfonyProcess::fromShellCommandline($cmd);
                     $process->setTimeout(null);
 
-                    $process->run(function ($type, $buffer) use ($currentStreamTitle, $failoverChannel, &$status) {
+                    Log::channel('ffmpeg')->info("Using low speed count threshold of {$lowSpeedThresholdCount} before triggering failover.");
+                    $process->run(function ($type, $buffer) use ($currentStreamTitle, $failoverChannel, &$status, $lowSpeedThresholdCount, $sourceChannel) {
                         if (connection_aborted()) {
                             Log::channel('ffmpeg')->info("Connection aborted by client for [{$currentStreamTitle}].");
                             $status['clientAborted'] = true;
@@ -312,11 +348,26 @@ class FailoverStreamController extends Controller
                                 if (preg_match('/speed=\s*([0-9\.]+x)/', $line, $matches)) {
                                     $speedValue = rtrim($matches[1], 'x');
                                     Log::channel('ffmpeg')->info("FFmpeg speed for [{$currentStreamTitle}]: {$speedValue}x");
+
+                                    // Add current speed to readings
+                                    $status['speedReadings'][] = $speedValue;
+                                    // Keep the size of speedReadings array manageable
+                                    if (count($status['speedReadings']) > $lowSpeedThresholdCount + 2) { // Keep a bit more than threshold for context
+                                        array_shift($status['speedReadings']);
+                                    }
+
                                     if ((float)$speedValue < (float)$failoverChannel->speed_threshold && (float)$speedValue > 0.0) {
                                         $status['lowSpeedCount']++;
-                                        Log::channel('ffmpeg')->warning("Low speed count for [{$currentStreamTitle}]: {$status['lowSpeedCount']}");
-                                        if ($status['lowSpeedCount'] >= 3) {
-                                            Log::channel('ffmpeg')->error("Speed for [{$currentStreamTitle}] consistently below threshold ({$failoverChannel->speed_threshold}x). Triggering failover by exception.");
+                                        Log::channel('ffmpeg')->warning("Low speed count for [{$currentStreamTitle}]: {$status['lowSpeedCount']} (threshold: {$lowSpeedThresholdCount})");
+        if ($status['lowSpeedCount'] >= $lowSpeedThresholdCount) { // <-- This is the line to change
+                                            $readingsString = implode(', ', $status['speedReadings']);
+                                            Log::channel('ffmpeg')->error(
+                                                "Speed for [{$currentStreamTitle}] consistently below threshold. " .
+                                                "Channel Threshold: {$failoverChannel->speed_threshold}x, " .
+                                                "Configured Count Threshold: {$lowSpeedThresholdCount}, " .
+                                                "Actual Low Speed Count: {$status['lowSpeedCount']}. " .
+                                                "Recent Speed Readings: [{$readingsString}]. Triggering failover by exception."
+                                            );
                                             throw new LowSpeedException("FFMPEG_SPEED_LOW_FAILOVER");
                                         }
                                     } else {
@@ -338,8 +389,8 @@ class FailoverStreamController extends Controller
                         if (!$status['clientAborted']) {
                             $cacheReasonFfmpeg = "failed_ffmpeg (Exit: " . $process->getExitCode() . ")";
                             $badSourceCacheKeyFfmpeg = self::BAD_SOURCE_CACHE_PREFIX . $sourceChannel->id; // Define key for this scope
-                            Redis::setex($badSourceCacheKeyFfmpeg, self::BAD_SOURCE_CACHE_MINUTES * 60, $cacheReasonFfmpeg);
-                            Log::channel('ffmpeg')->info("Added source ID {$sourceChannel->id} to bad source cache for " . self::BAD_SOURCE_CACHE_MINUTES . " minutes due to ffmpeg process failure. Reason: {$cacheReasonFfmpeg}");
+                            Redis::setex($badSourceCacheKeyFfmpeg, self::BAD_SOURCE_CACHE_SECONDS, $cacheReasonFfmpeg);
+                            Log::channel('ffmpeg')->info("Added source ID {$sourceChannel->id} to bad source cache for " . self::BAD_SOURCE_CACHE_SECONDS . " seconds due to ffmpeg process failure. Reason: {$cacheReasonFfmpeg}");
                         }
                     }
                 }, 200, [
@@ -357,8 +408,8 @@ class FailoverStreamController extends Controller
                 // Add to bad source cache for low speed
                 $cacheReasonLowSpeed = "failed_ffmpeg_low_speed";
                 $badSourceCacheKeyLowSpeed = self::BAD_SOURCE_CACHE_PREFIX . $sourceChannel->id; // Define key
-                Redis::setex($badSourceCacheKeyLowSpeed, self::BAD_SOURCE_CACHE_MINUTES * 60, $cacheReasonLowSpeed);
-                Log::channel('ffmpeg')->info("Added source ID {$sourceChannel->id} to bad source cache for " . self::BAD_SOURCE_CACHE_MINUTES . " minutes due to low speed. Reason: {$cacheReasonLowSpeed}");
+                Redis::setex($badSourceCacheKeyLowSpeed, self::BAD_SOURCE_CACHE_SECONDS, $cacheReasonLowSpeed);
+                Log::channel('ffmpeg')->info("Added source ID {$sourceChannel->id} to bad source cache for " . self::BAD_SOURCE_CACHE_SECONDS . " seconds due to low speed. Reason: {$cacheReasonLowSpeed}");
                 // No need to manually decrement here, shutdown function will handle it if $activeProfileIdForDecrement was set.
                 continue; 
             } catch (Exception $e) {
@@ -375,8 +426,8 @@ class FailoverStreamController extends Controller
                 // Add to bad source cache for general ffmpeg exceptions
                 $cacheReasonException = "failed_ffmpeg_exception (" . $e->getMessage() . ")";
                 $badSourceCacheKeyException = self::BAD_SOURCE_CACHE_PREFIX . $sourceChannel->id; // Define key
-                Redis::setex($badSourceCacheKeyException, self::BAD_SOURCE_CACHE_MINUTES * 60, $cacheReasonException);
-                Log::channel('ffmpeg')->info("Added source ID {$sourceChannel->id} to bad source cache for " . self::BAD_SOURCE_CACHE_MINUTES . " minutes due to ffmpeg exception. Reason: {$cacheReasonException}");
+                Redis::setex($badSourceCacheKeyException, self::BAD_SOURCE_CACHE_SECONDS, $cacheReasonException);
+                Log::channel('ffmpeg')->info("Added source ID {$sourceChannel->id} to bad source cache for " . self::BAD_SOURCE_CACHE_SECONDS . " seconds due to ffmpeg exception. Reason: {$cacheReasonException}");
                 // No need to manually decrement here, shutdown function will handle it if $activeProfileIdForDecrement was set.
                 continue; 
             }
@@ -397,44 +448,68 @@ class FailoverStreamController extends Controller
     protected function getStreamSettings(): array
     {
         $userPreferences = app(GeneralSettings::class);
-        $settings = [
+        $defaultSettings = [ // Renamed for clarity
             'ffmpeg_debug' => false,
             'ffmpeg_max_tries' => 3,
             'ffmpeg_user_agent' => 'VLC/3.0.21 LibVLC/3.0.21',
-            'ffmpeg_codec_video' => 'copy',
+            'ffmpeg_codec_video' => 'copy', // Old setting, primarily for remuxing if no hwaccel
+            'ffmpeg_codec_video_software' => 'libx264', // New explicit setting for software transcoding
             'ffmpeg_codec_audio' => 'copy',
             'ffmpeg_codec_subtitles' => 'copy',
             'ffmpeg_path' => 'jellyfin-ffmpeg',
-            // 'ffmpeg_vaapi_enabled' => false, // Removed
-            'hardware_acceleration_method' => 'none', // Added
+            'hardware_acceleration_method' => 'none',
             'ffmpeg_vaapi_device' => '/dev/dri/renderD128',
-            'ffmpeg_vaapi_video_filter' => 'scale_vaapi=format=nv12', // Default, might be overwritten or conditionally changed
+            'ffmpeg_vaapi_video_filter' => 'scale_vaapi=format=nv12',
+            // Add any other QSV/NVENC related default settings if needed (e.g., qsv_device)
         ];
 
         try {
-            $settings = [
-                'ffmpeg_debug' => $userPreferences->ffmpeg_debug ?? $settings['ffmpeg_debug'],
-                'ffmpeg_max_tries' => $userPreferences->ffmpeg_max_tries ?? $settings['ffmpeg_max_tries'],
-                'ffmpeg_user_agent' => $userPreferences->ffmpeg_user_agent ?? $settings['ffmpeg_user_agent'],
-                'ffmpeg_codec_video' => $userPreferences->ffmpeg_codec_video ?? $settings['ffmpeg_codec_video'],
-                'ffmpeg_codec_audio' => $userPreferences->ffmpeg_codec_audio ?? $settings['ffmpeg_codec_audio'],
-                'ffmpeg_codec_subtitles' => $userPreferences->ffmpeg_codec_subtitles ?? $settings['ffmpeg_codec_subtitles'],
-                'ffmpeg_path' => $userPreferences->ffmpeg_path ?? $settings['ffmpeg_path'],
-                'hardware_acceleration_method' => $userPreferences->hardware_acceleration_method ?? $settings['hardware_acceleration_method'], // Fetched
-                'ffmpeg_vaapi_device' => $userPreferences->ffmpeg_vaapi_device ?? $settings['ffmpeg_vaapi_device'],
-                'ffmpeg_vaapi_video_filter' => $userPreferences->ffmpeg_vaapi_video_filter ?? $settings['ffmpeg_vaapi_video_filter'], // Fetched
+            $finalSettings = [ // Use a new array to build final settings
+                'ffmpeg_debug' => $userPreferences->ffmpeg_debug ?? $defaultSettings['ffmpeg_debug'],
+                'ffmpeg_max_tries' => $userPreferences->ffmpeg_max_tries ?? $defaultSettings['ffmpeg_max_tries'],
+                'ffmpeg_user_agent' => $userPreferences->ffmpeg_user_agent ?? $defaultSettings['ffmpeg_user_agent'],
+                // ffmpeg_codec_video (old setting) - primarily for remuxing or if user explicitly set it to a software codec
+                'ffmpeg_codec_video' => $userPreferences->ffmpeg_codec_video ?? $defaultSettings['ffmpeg_codec_video'], 
+                // ffmpeg_codec_video_software (new explicit setting)
+                'ffmpeg_codec_video_software' => $userPreferences->ffmpeg_codec_video_software ?? $defaultSettings['ffmpeg_codec_video_software'],
+                'ffmpeg_codec_audio' => $userPreferences->ffmpeg_codec_audio ?? $defaultSettings['ffmpeg_codec_audio'],
+                'ffmpeg_codec_subtitles' => $userPreferences->ffmpeg_codec_subtitles ?? $defaultSettings['ffmpeg_codec_subtitles'],
+                'ffmpeg_path' => $userPreferences->ffmpeg_path ?? $defaultSettings['ffmpeg_path'],
+                'hardware_acceleration_method' => $userPreferences->hardware_acceleration_method ?? $defaultSettings['hardware_acceleration_method'],
+                'ffmpeg_vaapi_device' => $userPreferences->ffmpeg_vaapi_device ?? $defaultSettings['ffmpeg_vaapi_device'],
+                'ffmpeg_vaapi_video_filter' => $userPreferences->ffmpeg_vaapi_video_filter ?? $defaultSettings['ffmpeg_vaapi_video_filter'],
+                'ffmpeg_additional_args' => config('proxy.ffmpeg_additional_args', ''),
             ];
-            $settings['ffmpeg_additional_args'] = config('proxy.ffmpeg_additional_args', '');
 
-            // Apply conditional default for ffmpeg_vaapi_video_filter
-            if (($settings['hardware_acceleration_method'] ?? 'none') === 'vaapi' && empty($settings['ffmpeg_vaapi_video_filter'])) {
-                $settings['ffmpeg_vaapi_video_filter'] = 'scale_vaapi=format=nv12'; // Default VAAPI filter
+            // Logic to determine the effective software video codec:
+            $userPrefSoftwareCodec = $userPreferences->ffmpeg_codec_video_software ?? null;
+            $userPrefOldVideoCodec = $userPreferences->ffmpeg_codec_video ?? null;
+            $knownSoftwareCodecs = ['copy', 'libx264', 'libx265']; // Add other common software codecs if needed
+
+            if (isset($userPrefSoftwareCodec) && !empty($userPrefSoftwareCodec)) {
+                $finalSettings['ffmpeg_codec_video_software'] = $userPrefSoftwareCodec;
+            } elseif (isset($userPrefOldVideoCodec) && in_array($userPrefOldVideoCodec, $knownSoftwareCodecs, true)) {
+                // If old setting is a known software codec, use it for the new software setting
+                $finalSettings['ffmpeg_codec_video_software'] = $userPrefOldVideoCodec;
+            } else {
+                // Fallback to default from $defaultSettings if neither user preference is a valid software choice
+                $finalSettings['ffmpeg_codec_video_software'] = $defaultSettings['ffmpeg_codec_video_software'];
             }
+            
+            // The original ffmpeg_codec_video is kept in finalSettings for now, 
+            // but __invoke method primarily uses ffmpeg_codec_video_software for its software path.
+            // This avoids breaking existing setups that might use ffmpeg_codec_video for 'copy'.
+
+            // Apply conditional default for ffmpeg_vaapi_video_filter (existing logic)
+            if (($finalSettings['hardware_acceleration_method'] ?? 'none') === 'vaapi' && empty($finalSettings['ffmpeg_vaapi_video_filter'])) {
+                $finalSettings['ffmpeg_vaapi_video_filter'] = $defaultSettings['ffmpeg_vaapi_video_filter']; // Ensure this uses defaultSettings
+            }
+            return $finalSettings; // Return the merged and processed settings
 
         } catch (Exception $e) {
             Log::error("Error fetching stream settings: " . $e->getMessage());
         }
-        return $settings;
+        return $defaultSettings; // Fallback to default settings in case of exception
     }
 
     public function serveHlsPlaylist(Request $request, FailoverChannel $failoverChannel)
@@ -602,8 +677,8 @@ class FailoverStreamController extends Controller
                 // Add to bad source cache
                 $badSourceCacheKeyFail = self::BAD_SOURCE_CACHE_PREFIX . $currentSource['id'];
                 $cacheReason = "failed_hls_startup (" . $e->getMessage() . ")";
-                Redis::setex($badSourceCacheKeyFail, self::BAD_SOURCE_CACHE_MINUTES * 60, $cacheReason);
-                Log::channel('ffmpeg')->info("HLS Failover: Added source ID {$currentSource['id']} to bad source cache for " . self::BAD_SOURCE_CACHE_MINUTES . " minutes due to HLS startStream failure. Reason: {$cacheReason}");
+                Redis::setex($badSourceCacheKeyFail, self::BAD_SOURCE_CACHE_SECONDS, $cacheReason);
+                Log::channel('ffmpeg')->info("HLS Failover: Added source ID {$currentSource['id']} to bad source cache for " . self::BAD_SOURCE_CACHE_SECONDS . " seconds due to HLS startStream failure. Reason: {$cacheReason}");
                 $pid = null; // Ensure pid is null if startStream failed
 
                 // Update session to reflect failure and allow quick retry of next source
@@ -650,8 +725,8 @@ class FailoverStreamController extends Controller
                 // Add to bad source cache
                 $badSourceCacheKeyDied = self::BAD_SOURCE_CACHE_PREFIX . $currentSource['id'];
                 $cacheReasonDied = "failed_hls_process_died_waiting_playlist";
-                Redis::setex($badSourceCacheKeyDied, self::BAD_SOURCE_CACHE_MINUTES * 60, $cacheReasonDied);
-                Log::channel('ffmpeg')->info("HLS Failover: Added source ID {$currentSource['id']} to bad source cache for " . self::BAD_SOURCE_CACHE_MINUTES . " minutes. Reason: {$cacheReasonDied}");
+                Redis::setex($badSourceCacheKeyDied, self::BAD_SOURCE_CACHE_SECONDS, $cacheReasonDied);
+                Log::channel('ffmpeg')->info("HLS Failover: Added source ID {$currentSource['id']} to bad source cache for " . self::BAD_SOURCE_CACHE_SECONDS . " seconds. Reason: {$cacheReasonDied}");
 
                 // Clear PID from session so next request attempts failover by trying the next source
                 $sessionData['current_ffmpeg_pid'] = null;
@@ -678,8 +753,8 @@ class FailoverStreamController extends Controller
                 // Add to bad source cache
                 $badSourceCacheKeyNotReadyDied = self::BAD_SOURCE_CACHE_PREFIX . $currentSource['id'];
                 $cacheReasonNotReadyDied = "failed_hls_playlist_not_ready_process_died";
-                Redis::setex($badSourceCacheKeyNotReadyDied, self::BAD_SOURCE_CACHE_MINUTES * 60, $cacheReasonNotReadyDied);
-                Log::channel('ffmpeg')->info("HLS Failover: Added source ID {$currentSource['id']} to bad source cache for " . self::BAD_SOURCE_CACHE_MINUTES . " minutes. Reason: {$cacheReasonNotReadyDied}");
+                Redis::setex($badSourceCacheKeyNotReadyDied, self::BAD_SOURCE_CACHE_SECONDS, $cacheReasonNotReadyDied);
+                Log::channel('ffmpeg')->info("HLS Failover: Added source ID {$currentSource['id']} to bad source cache for " . self::BAD_SOURCE_CACHE_SECONDS . " seconds. Reason: {$cacheReasonNotReadyDied}");
                 
                 // Clear the session to force a full re-evaluation, including re-fetching sources.
                 // This is a strong measure for when a source seems definitively broken.
