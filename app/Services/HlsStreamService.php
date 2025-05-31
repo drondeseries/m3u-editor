@@ -182,6 +182,17 @@ class HlsStreamService
                     playlistId: $playlist->id
                 );
                 Log::channel('ffmpeg')->info("Successfully started HLS stream for {$type} {$currentStreamTitle} (ID: {$stream->id}) on playlist {$playlist->id}.");
+
+                if ($stream->id == $model->id) {
+                    // Primary stream started successfully, delete any existing failover map for this original model ID
+                    Redis::del("hls:failover_map:{$type}:{$model->id}");
+                    Log::channel('ffmpeg')->info("Primary stream for {$type} ID {$model->id} started. Cleared any failover map.");
+                } else {
+                    // Failover stream started successfully for the original model ID
+                    $failoverMapTtl = config('proxy.hls_failover_map_ttl', 3600); // Default 1 hour
+                    Redis::setex("hls:failover_map:{$type}:{$model->id}", $failoverMapTtl, $stream->id);
+                    Log::channel('ffmpeg')->info("Failover stream ID {$stream->id} started for original {$type} ID {$model->id}. Map set with TTL: {$failoverMapTtl}s.");
+                }
                 return; // Exit after successfully starting a stream
 
             } catch (SourceNotResponding $e) {
