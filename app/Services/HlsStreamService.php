@@ -110,101 +110,105 @@ class HlsStreamService
      */
     public function startStreamWithFailover(
         string $type,
-        Channel|Episode $model,
-        string $streamUrl,
-        string $title
+        Channel|Episode $model, // This $model is the *original* requested channel/episode
+        string $streamUrl,    // This $streamUrl is the URL of the *original* model
+        string $title         // This $title is the title of the *original* model
     ): void {
         // Get the failover channels (if any)
         $streams = collect([$model]);
-        if ($type === 'channel') {
-            $streams->concat($model->failoverChannels);
+        if ($type === 'channel' && $model instanceof Channel) { // Ensure $model is a Channel for failoverChannels
+            $streams = $streams->concat($model->failoverChannels);
         }
 
-        // Record timestamp in Redis (never expires until we prune)
+        // Record timestamp in Redis for the original model (never expires until we prune)
         Redis::set("hls:{$type}_last_seen:{$model->id}", now()->timestamp);
 
-        // Add to active IDs set
+        // Add to active IDs set for the original model
         Redis::sadd("hls:active_{$type}_ids", $model->id);
 
-        // Get the title for the channel
-        $title = $type === 'channel'
-            ? $model->title_custom ?? $model->title
-            : $model->title;
-        $title = strip_tags($title);
-
         // Loop over the failover channels and grab the first one that works.
-        foreach ($streams as $stream) {
-            // Make sure we have a valid source channel
-            $badSourceCacheKey = ProxyService::BAD_SOURCE_CACHE_PREFIX . $stream->id;
+        foreach ($streams as $stream) { // $stream is the current primary or failover channel being attempted
+            // Get the title for the current stream in the loop
+            $currentStreamTitle = $type === 'channel'
+                ? ($stream->title_custom ?? $stream->title)
+                : $stream->title;
+            $currentStreamTitle = strip_tags($currentStreamTitle);
+
+            // Check if playlist is specified for the current stream
+            $playlist = $stream->playlist;
+
+            // Make sure we have a valid source channel (using current stream's ID and its playlist ID)
+            $badSourceCacheKey = ProxyService::BAD_SOURCE_CACHE_PREFIX . $stream->id . ':' . $playlist->id;
             if (Redis::exists($badSourceCacheKey)) {
                 if ($model->id === $stream->id) {
-                    Log::channel('ffmpeg')->info("Skipping source ID {$title} ({$model->id}) for as it was recently marked as bad. Reason: " . (Redis::get($badSourceCacheKey) ?: 'N/A'));
+                    Log::channel('ffmpeg')->info("Skipping source ID {$currentStreamTitle} ({$stream->id}) for as it was recently marked as bad for playlist {$playlist->id}. Reason: " . (Redis::get($badSourceCacheKey) ?: 'N/A'));
                 } else {
-                    Log::channel('ffmpeg')->info("Skipping Failover {$type} {$stream->name} for source {$title} ({$model->id}) as it was recently marked as bad. Reason: " . (Redis::get($badSourceCacheKey) ?: 'N/A'));
+                    Log::channel('ffmpeg')->info("Skipping Failover {$type} {$stream->name} for source {$model->title} ({$model->id}) as it (stream ID {$stream->id}) was recently marked as bad for playlist {$playlist->id}. Reason: " . (Redis::get($badSourceCacheKey) ?: 'N/A'));
                 }
                 continue;
             }
 
-            // Check if playlist is specified
-            $playlist = $stream->playlist;
-
             // Keep track of the active streams for this playlist using optimistic locking pattern
             $activeStreamsKey = "active_streams:{$playlist->id}";
-
-            // First increment the counter
             $activeStreams = Redis::incr($activeStreamsKey);
 
-            // Make sure we haven't gone negative for any reason, this should never be 0 or less
             if ($activeStreams <= 0) {
                 Redis::set($activeStreamsKey, 1);
                 $activeStreams = 1;
             }
             Log::channel('ffmpeg')->info("Active streams for playlist {$playlist->id}: {$activeStreams} (after increment)");
 
-            // Then check if we're over limit
             if ($playlist->available_streams > 0 && $activeStreams > $playlist->available_streams) {
-                // We're over limit, so decrement and skip
                 Redis::decr($activeStreamsKey);
-                Log::channel('ffmpeg')->info("Max streams reached for playlist {$playlist->name} ({$playlist->id}). Skipping channel {$title}.");
+                Log::channel('ffmpeg')->info("Max streams reached for playlist {$playlist->name} ({$playlist->id}). Skipping channel {$currentStreamTitle}.");
                 continue;
             }
 
-            // Setup streams array
-            $streamUrl = $type === 'channel'
-                ? $model->url_custom ?? $model->url
-                : $model->url;
+            // URL for the current stream being attempted
+            $currentAttemptStreamUrl = $type === 'channel'
+                ? ($stream->url_custom ?? $stream->url) // Use current $stream's URL
+                : $stream->url;
 
-            // Determine the output format
             $userAgent = $playlist->user_agent ?? null;
             try {
-                // Run pre-check with ffprobe
-                $this->runPreCheck($streamUrl, $userAgent, $title);
+                $this->runPreCheck($currentAttemptStreamUrl, $userAgent, $currentStreamTitle);
 
-                // Attempt to start the stream
                 $this->startStreamWithSpeedCheck(
-                    type: $type, // 'channel' or 'episode'
-                    model: $model, // Peg to the base model
-                    streamUrl: $streamUrl, // Could be different based on the failover status
-                    title: $title, // Peg to the base model
-                    userAgent: $userAgent, // Dynamic, pulled from the source playlist user agent settings
-                    playlistId: $playlist->id, // Use the playlist ID for tracking
+                    type: $type,
+                    model: $stream, // Pass the current $stream object
+                    streamUrl: $currentAttemptStreamUrl, // Pass the URL of the current $stream
+                    title: $currentStreamTitle, // Pass the title of the current $stream
+                    userAgent: $userAgent,
+                    playlistId: $playlist->id
                 );
-            } catch (SourceNotResponding $e) {
-                // Log the error and cache the bad source
-                Log::channel('ffmpeg')->error("Source not responding for channel {$title}: " . $e->getMessage());
-                Redis::setex($badSourceCacheKey, ProxyService::BAD_SOURCE_CACHE_SECONDS, $e->getMessage());
+                Log::channel('ffmpeg')->info("Successfully started HLS stream for {$type} {$currentStreamTitle} (ID: {$stream->id}) on playlist {$playlist->id}.");
 
-                // Try the next failover channel
+                if ($stream->id == $model->id) {
+                    // Primary stream started successfully, delete any existing failover map for this original model ID
+                    Redis::del("hls:failover_map:{$type}:{$model->id}");
+                    Log::channel('ffmpeg')->info("Primary stream for {$type} ID {$model->id} started. Cleared any failover map.");
+                } else {
+                    // Failover stream started successfully for the original model ID
+                    $failoverMapTtl = config('proxy.hls_failover_map_ttl', 3600); // Default 1 hour
+                    Redis::setex("hls:failover_map:{$type}:{$model->id}", $failoverMapTtl, $stream->id);
+                    Log::channel('ffmpeg')->info("Failover stream ID {$stream->id} started for original {$type} ID {$model->id}. Map set with TTL: {$failoverMapTtl}s.");
+                }
+                return; // Exit after successfully starting a stream
+
+            } catch (SourceNotResponding $e) {
+                Log::channel('ffmpeg')->error("Source not responding for {$type} {$currentStreamTitle} (ID: {$stream->id}) on playlist {$playlist->id}: " . $e->getMessage());
+                Redis::setex($badSourceCacheKey, ProxyService::BAD_SOURCE_CACHE_SECONDS, $e->getMessage());
+                Redis::decr($activeStreamsKey); // Decrement active streams since this one failed
                 continue;
             } catch (Exception $e) {
-                // Log the error and abort
-                Log::channel('ffmpeg')->error("Error streaming channel {$title}: " . $e->getMessage());
+                Log::channel('ffmpeg')->error("Error streaming {$type} {$currentStreamTitle} (ID: {$stream->id}) on playlist {$playlist->id}: " . $e->getMessage());
                 Redis::setex($badSourceCacheKey, ProxyService::BAD_SOURCE_CACHE_SECONDS, $e->getMessage());
-
-                // Try the next failover channel
+                Redis::decr($activeStreamsKey); // Decrement active streams since this one failed
                 continue;
             }
         }
+        // If loop finishes, no stream was successfully started
+        Log::channel('ffmpeg')->error("No available (HLS) streams for {$type} {$title} (Original Model ID: {$model->id}) after trying all sources.");
     }
 
     /**
@@ -315,17 +319,48 @@ class HlsStreamService
     private function runPreCheck($streamUrl, $userAgent, $title)
     {
         $ffprobePath = config('proxy.ffprobe_path', 'ffprobe');
-        $cmd = "$ffprobePath -v quiet -print_format json -show_streams -select_streams v:0 -user_agent " . escapeshellarg($userAgent) . " " . escapeshellarg($streamUrl);
-        Log::channel('ffmpeg')->info("[PRE-CHECK] Executing ffprobe command for [{$title}]: {$cmd}");
 
-        $process = SymfonyProcess::fromShellCommandline($cmd);
-        $process->setTimeout(5);
-        $process->run();
-        if (!$process->isSuccessful()) {
-            throw new SourceNotResponding("ffprobe failed for {$title}: " . $process->getErrorOutput());
+        // Determine effective User-Agent
+        $effectiveUserAgent = $userAgent;
+        $oldUserAgent = 'Mozilla/5.0 (Windows; U; Windows NT 5.1; en-US; rv:1.8.1.13) Gecko/20080311 Firefox/2.0.0.13';
+        if (empty($effectiveUserAgent) || $effectiveUserAgent === $oldUserAgent) {
+            $effectiveUserAgent = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36';
         }
 
-        Log::channel('ffmpeg')->info("[PRE-CHECK] ffprobe successful for [{$title}].");
+        $cmd = "$ffprobePath -v quiet -print_format json -show_streams -select_streams v:0 -user_agent " . escapeshellarg($effectiveUserAgent) . " " . escapeshellarg($streamUrl);
+        Log::channel('ffmpeg')->info("[PRE-CHECK] Executing ffprobe command for [{$title}]: {$cmd}");
+        $precheckProcess = SymfonyProcess::fromShellCommandline($cmd);
+        $precheckProcess->setTimeout(10); // Changed from 5 to 10
+        try {
+            $precheckProcess->run();
+            if (!$precheckProcess->isSuccessful()) {
+                Log::channel('ffmpeg')->error("[PRE-CHECK] ffprobe failed for source [{$title}]. Exit Code: " . $precheckProcess->getExitCode() . ". Error Output: " . $precheckProcess->getErrorOutput());
+                throw new SourceNotResponding("failed_ffprobe (Exit: " . $precheckProcess->getExitCode() . ")");
+            }
+            Log::channel('ffmpeg')->info("[PRE-CHECK] ffprobe successful for source [{$title}].");
+
+            // Check channel health
+            $ffprobeOutput = $precheckProcess->getOutput();
+            $streamInfo = json_decode($ffprobeOutput, true);
+            if (json_last_error() === JSON_ERROR_NONE && isset($streamInfo['streams'])) {
+                foreach ($streamInfo['streams'] as $stream) {
+                    if (isset($stream['codec_type']) && $stream['codec_type'] === 'video') {
+                        $codecName = $stream['codec_name'] ?? 'N/A';
+                        $pixFmt = $stream['pix_fmt'] ?? 'N/A';
+                        $width = $stream['width'] ?? 'N/A';
+                        $height = $stream['height'] ?? 'N/A';
+                        $profile = $stream['profile'] ?? 'N/A';
+                        $level = $stream['level'] ?? 'N/A';
+                        Log::channel('ffmpeg')->info("[PRE-CHECK] Source [{$title}] video stream: Codec: {$codecName}, Format: {$pixFmt}, Resolution: {$width}x{$height}, Profile: {$profile}, Level: {$level}");
+                        break;
+                    }
+                }
+            } else {
+                Log::channel('ffmpeg')->warning("[PRE-CHECK] Could not decode ffprobe JSON output or no streams found for [{$title}]. Output: " . $ffprobeOutput);
+            }
+        } catch (Exception $e) {
+            throw new SourceNotResponding("failed_ffprobe_exception (" . $e->getMessage() . ")");
+        }
     }
 
     /**
@@ -527,9 +562,15 @@ class HlsStreamService
                 if (!empty($qsvFilterFromSettings)) {
                     // This filter is applied to frames already in QSV format
                     $videoFilterArgs = "-vf '" . trim($qsvFilterFromSettings, "'") . "' ";
+                } else {
+                    // Add default QSV video filter for HLS if not set by user
+                    $videoFilterArgs = "-vf 'hwupload=extra_hw_frames=64,scale_qsv=format=nv12' ";
                 }
-                if (!empty($qsvEncoderOptions)) {
+                if (!empty($qsvEncoderOptions)) { // $qsvEncoderOptions = $settings['ffmpeg_qsv_encoder_options']
                     $codecSpecificArgs = trim($qsvEncoderOptions) . " ";
+                } else {
+                    // Default QSV encoder options for HLS if not set by user
+                    $codecSpecificArgs = "-preset medium -global_quality 23 "; // Ensure trailing space
                 }
                 if (!empty($qsvAdditionalArgs)) {
                     $userArgs = trim($qsvAdditionalArgs) . ($userArgs ? " " . $userArgs : "");
@@ -646,7 +687,7 @@ class HlsStreamService
             '-hls_base_url ' . escapeshellarg($segmentBaseUrl) . ' ' .
             escapeshellarg($m3uPlaylist) . ' ';
 
-        $cmd .= ($settings['ffmpeg_debug'] ? ' -loglevel verbose' : ' -hide_banner -nostats -loglevel error');
+        $cmd .= ($settings['ffmpeg_debug'] ? ' -loglevel info' : ' -hide_banner -nostats -loglevel error');
 
         return $cmd;
     }

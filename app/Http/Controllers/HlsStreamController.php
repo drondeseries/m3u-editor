@@ -164,6 +164,15 @@ class HlsStreamController extends Controller
             // Log::channel('ffmpeg')->info("HLS stream already running for $type {$model->id} ({$title})");
         }
 
+        // Update last_seen timestamp when playlist is requested
+        Redis::transaction(function () use ($type, $model) {
+            // Record timestamp in Redis (never expires until we prune)
+            Redis::set("hls:{$type}_last_seen:{$model->id}", now()->timestamp);
+
+            // Add to active IDs set (ensures it's in the set if it wasn't already)
+            Redis::sadd("hls:active_{$type}_ids", $model->id);
+        });
+
         // Return the Playlist
         $pid = Cache::get("hls:pid:{$type}:{$model->id}");
         $pathPrefix = $type === 'channel' ? '' : 'e/';
