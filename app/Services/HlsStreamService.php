@@ -687,7 +687,7 @@ class HlsStreamService
             '-hls_base_url ' . escapeshellarg($segmentBaseUrl) . ' ' .
             escapeshellarg($m3uPlaylist) . ' ';
 
-        $cmd .= ($settings['ffmpeg_debug'] ? ' -loglevel verbose' : ' -hide_banner -nostats -loglevel error');
+        $cmd .= ($settings['ffmpeg_debug'] ? ' -loglevel info' : ' -hide_banner -nostats -loglevel error');
 
         return $cmd;
     }
