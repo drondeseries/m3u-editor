@@ -42,7 +42,7 @@ RUN apk update && apk --no-cache add \
 
 # Add architecture-specific packages conditionally
 RUN if [ "$(uname -m)" = "x86_64" ]; then \
-        apk add --no-cache intel-media-driver intel-media-sdk libva-intel-driver; \
+        apk add --no-cache intel-media-driver libva-intel-driver; \
     else \
         echo "Skipping Intel-specific packages on $(uname -m) architecture"; \
     fi
@@ -110,11 +110,7 @@ COPY start-container /usr/local/bin/start-container
 RUN chmod +x /usr/local/bin/start-container
 
 # Pull app code
-RUN git clone https://github.com/sparkison/m3u-editor.git /tmp/m3u-editor \
-    && mv /tmp/m3u-editor/* /var/www/html \
-    && mv /tmp/m3u-editor/.git /var/www/html/.git \
-    && mv /tmp/m3u-editor/.env.example /var/www/html/.env.example \
-    && rm -rf /tmp/m3u-editor
+COPY . /var/www/html
 
 # Configure git
 RUN git config --global --add safe.directory /var/www/html
