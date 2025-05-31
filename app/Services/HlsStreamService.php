@@ -319,10 +319,18 @@ class HlsStreamService
     private function runPreCheck($streamUrl, $userAgent, $title)
     {
         $ffprobePath = config('proxy.ffprobe_path', 'ffprobe');
-        $cmd = "$ffprobePath -v quiet -print_format json -show_streams -select_streams v:0 -user_agent " . escapeshellarg($userAgent) . " " . escapeshellarg($streamUrl);
+
+        // Determine effective User-Agent
+        $effectiveUserAgent = $userAgent;
+        $oldUserAgent = 'Mozilla/5.0 (Windows; U; Windows NT 5.1; en-US; rv:1.8.1.13) Gecko/20080311 Firefox/2.0.0.13';
+        if (empty($effectiveUserAgent) || $effectiveUserAgent === $oldUserAgent) {
+            $effectiveUserAgent = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36';
+        }
+
+        $cmd = "$ffprobePath -v quiet -print_format json -show_streams -select_streams v:0 -user_agent " . escapeshellarg($effectiveUserAgent) . " " . escapeshellarg($streamUrl);
         Log::channel('ffmpeg')->info("[PRE-CHECK] Executing ffprobe command for [{$title}]: {$cmd}");
         $precheckProcess = SymfonyProcess::fromShellCommandline($cmd);
-        $precheckProcess->setTimeout(5);
+        $precheckProcess->setTimeout(10); // Changed from 5 to 10
         try {
             $precheckProcess->run();
             if (!$precheckProcess->isSuccessful()) {
