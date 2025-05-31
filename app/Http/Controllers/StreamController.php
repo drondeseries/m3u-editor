@@ -52,7 +52,7 @@ class StreamController extends Controller
             $title = strip_tags($title);
 
             // Make sure we have a valid source channel
-            $badSourceCacheKey = ProxyService::BAD_SOURCE_CACHE_PREFIX . $stream->id;
+            $badSourceCacheKey = ProxyService::BAD_SOURCE_CACHE_PREFIX . $stream->id . ':' . $stream->playlist->id;
             if (Redis::exists($badSourceCacheKey)) {
                 if ($sourceChannel->id === $stream->id) {
                     Log::channel('ffmpeg')->info("Skipping source ID {$title} ({$sourceChannel->id}) for as it was recently marked as bad. Reason: " . (Redis::get($badSourceCacheKey) ?: 'N/A'));
@@ -79,7 +79,9 @@ class StreamController extends Controller
             Log::channel('ffmpeg')->info("Active streams for playlist {$playlist->id}: {$activeStreams} (after increment)");
 
             // Then check if we're over limit
-            if ($playlist->available_streams > 0 && $activeStreams > $playlist->available_streams) {
+            // Ignore for MP4 since those will be requests from Video.js
+            // Video.js will make a request for the metadate before loading the stream, so can use twp connections in a short amount of time
+            if ($format !== 'mp4' && $playlist->available_streams > 0 && $activeStreams > $playlist->available_streams) {
                 // We're over limit, so decrement and skip
                 Redis::decr($activeStreamsKey);
                 Log::channel('ffmpeg')->info("Max streams reached for playlist {$playlist->name} ({$playlist->id}). Skipping channel {$title}.");
@@ -87,7 +89,7 @@ class StreamController extends Controller
             }
 
             // Setup streams array
-            $streamUrl = $stream->url_custom ?? $channel->url;
+            $streamUrl = $stream->url_custom ?? $stream->url;
 
             // Determine the output format
             $ip = $request->ip();
@@ -128,7 +130,6 @@ class StreamController extends Controller
         }
 
         // Out of streams to try
-        Redis::decr($activeStreamsKey);
         Log::channel('ffmpeg')->error("No available streams for channel {$channel->id} ({$channel->title}).");
         abort(503, 'No valid streams found for this channel.');
     }
@@ -177,7 +178,9 @@ class StreamController extends Controller
         Log::channel('ffmpeg')->info("Active streams for playlist {$playlist->id}: {$activeStreams} (after increment)");
 
         // Then check if we're over limit
-        if ($playlist->available_streams > 0 && $activeStreams > $playlist->available_streams) {
+        // Ignore for MP4 since those will be requests from Video.js
+        // Video.js will make a request for the metadate before loading the stream, so can use twp connections in a short amount of time
+        if ($format !== 'mp4' && $playlist->available_streams > 0 && $activeStreams > $playlist->available_streams) {
             // We're over limit, so decrement and skip
             Redis::decr($activeStreamsKey);
             Log::channel('ffmpeg')->info("Max streams reached for playlist {$playlist->name} ({$playlist->id}). Aborting episode {$title}.");
@@ -493,8 +496,8 @@ class StreamController extends Controller
             $codecSpecificArgs = ''; // For QSV or other codec-specific args not part of -vf
 
             // Get base ffmpeg output codec formats (these are defaults or from non-QSV/VA-API settings)
-            $audioCodec = config('proxy.ffmpeg_codec_audio') ?: $settings['ffmpeg_codec_audio'];
-            $subtitleCodec = config('proxy.ffmpeg_codec_subtitles') ?: $settings['ffmpeg_codec_subtitles'];
+            $audioCodec = (config('proxy.ffmpeg_codec_audio') ?: ($settings['ffmpeg_codec_audio'] ?? null)) ?: 'copy';
+            $subtitleCodec = (config('proxy.ffmpeg_codec_subtitles') ?: ($settings['ffmpeg_codec_subtitles'] ?? null)) ?: 'copy';
 
             // Hardware Acceleration Logic
             if ($settings['ffmpeg_vaapi_enabled'] ?? false) {
@@ -519,8 +522,8 @@ class StreamController extends Controller
                 if (!empty($settings['ffmpeg_qsv_video_filter'])) {
                     $videoFilterArgs = "-vf " . escapeshellarg(trim($settings['ffmpeg_qsv_video_filter'], "'\",")) . " ";
                 } else {
-                    // Simplified filter chain for QSV
-                    $videoFilterArgs = "-vf 'format=nv12,hwupload=extra_hw_frames=64' ";
+                    // Default QSV video filter, matches user's working example
+                    $videoFilterArgs = "-vf 'hwupload=extra_hw_frames=64,scale_qsv=format=nv12' ";
                 }
 
                 // Additional QSV specific options
@@ -556,9 +559,6 @@ class StreamController extends Controller
 
             // User defined general options:
             $cmd .= $userArgs;
-
-            // Codec specific additional arguments (e.g. QSV specific):
-            $cmd .= $codecSpecificArgs;
 
             // Input:
             if ($format === 'ts') {
@@ -618,8 +618,8 @@ class StreamController extends Controller
             }
 
             $videoCodecForTemplate = $settings['ffmpeg_codec_video'] ?: 'copy';
-            $audioCodecForTemplate = $settings['ffmpeg_codec_audio'] ?: 'copy';
-            $subtitleCodecForTemplate = $settings['ffmpeg_codec_subtitles'] ?: 'copy';
+            $audioCodecForTemplate = (config('proxy.ffmpeg_codec_audio') ?: ($settings['ffmpeg_codec_audio'] ?? null)) ?: 'copy';
+            $subtitleCodecForTemplate = (config('proxy.ffmpeg_codec_subtitles') ?: ($settings['ffmpeg_codec_subtitles'] ?? null)) ?: 'copy';
 
             $outputCommandSegment = $format === 'ts'
                 ? "-c:v {$videoCodecForTemplate} -c:a {$audioCodecForTemplate} -c:s {$subtitleCodecForTemplate} -f mpegts pipe:1"
