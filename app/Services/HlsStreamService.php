@@ -25,61 +25,78 @@ class HlsStreamService
      * @param string $type
      * @param Channel|Episode $model The Channel model instance
      * @param string $title The title of the channel
+     * @param int|null $originalModelIdToPreservePaths If provided, paths and PIDs are linked to this original model ID during failover.
      */
     public function startStream(
         string $type,
-        Channel|Episode $model, // This $model is the *original* requested channel/episode
-        string $title           // This $title is the title of the *original* model
+        Channel|Episode $model, // This $model is the *original* requested channel/episode, or the one to failover FROM
+        string $title,          // This $title is the title of the *original* model
+        ?int $originalModelIdToPreservePaths = null
     ): ?object {
+        $idForLogging = $originalModelIdToPreservePaths ?? $model->id;
         // Get stream settings, including the ffprobe timeout
         $streamSettings = ProxyService::getStreamSettings();
         $ffprobeTimeout = $streamSettings['ffmpeg_ffprobe_timeout'] ?? 5; // Default to 5 if not set
 
-        // Get the failover channels (if any)
-        $streams = collect([$model]);
+        // If $originalModelIdToPreservePaths is set, $model is the one that died.
+        // We need to ensure its PID (if it was running) is cleared before attempting failover.
+        // The isRunning check here is more about preventing duplicate stream starts for the *same source URL*
+        // rather than the original model ID path.
+        // For a failover, we are explicitly trying to start a *new* physical stream for the *original path*.
 
-        // If type is channel, include failover channels
+        $modelIdForPathAndPid = $originalModelIdToPreservePaths ?? $model->id;
+
+        // Build the list of streams to try.
+        // If it's a failover, $model is the original one that failed.
+        // If not a failover, $model is the one being requested directly.
+        $streamsToAttempt = collect([$model]);
         if ($type === 'channel' && $model instanceof Channel) {
-            $streams = $streams->concat($model->failoverChannels);
+            $streamsToAttempt = $streamsToAttempt->concat($model->failoverChannels);
         }
 
-        // First check if any of the streams (including failovers) are already running
-        foreach ($streams as $stream) {
-            if ($this->isRunning($type, $stream->id)) {
-                $existingStreamTitle = $type === 'channel'
-                    ? ($stream->title_custom ?? $stream->title)
-                    : $stream->title;
-                $existingStreamTitle = strip_tags($existingStreamTitle);
-
-                Log::channel('ffmpeg')->info("HLS Stream: Found existing running stream for $type ID {$stream->id} ({$existingStreamTitle}) - reusing for original request {$model->id} ({$title}).");
-                return $stream; // Return the already running stream
-            }
+        // If this is a failover for an existing stream, that existing stream's PID should have been
+        // handled by the monitor (e.g. detected as not running).
+        // We check if a stream is already running using the $modelIdForPathAndPid to avoid conflicts
+        // if another process somehow restarted it for the same original path.
+        if (!$originalModelIdToPreservePaths && $this->isRunning($type, $modelIdForPathAndPid)) {
+            // This check is primarily for non-failover scenarios.
+            // For failovers, the monitor should have confirmed the original is down.
+            // However, if something is running under the original ID path, we should log and potentially reuse.
+            // This part of logic might need refinement based on how strictly "one process per original ID path" is enforced.
+            $existingStreamTitle = $type === 'channel'
+                ? ($model->title_custom ?? $model->title) // Assuming $model is the one matching $modelIdForPathAndPid
+                : $model->title;
+            $existingStreamTitle = strip_tags($existingStreamTitle);
+            Log::channel('ffmpeg')->info("HLS Stream: Found existing running stream for $type ID {$modelIdForPathAndPid} ({$existingStreamTitle}) - reusing for request {$idForLogging} ({$title}).");
+            return $model; // Or fetch the actual stream source if different and it's a failover case.
         }
 
-        // Record timestamp in Redis for the original model (never expires until we prune)
+
+        // Record timestamp in Redis for the original model (or the model itself if not failover)
+        // $model->id here refers to the ID of the original model that was requested or failed.
         Redis::set("hls:{$type}_last_seen:{$model->id}", now()->timestamp);
 
-        // Add to active IDs set for the original model
+        // Add to active IDs set for the original model (or the model itself if not failover)
         Redis::sadd("hls:active_{$type}_ids", $model->id);
 
-        // Loop over the failover channels and grab the first one that works.
-        foreach ($streams as $stream) { // $stream is the current primary or failover channel being attempted
-            // Get the title for the current stream in the loop
+        // Loop over the failover channels (or the single stream if not a channel/episode with failovers)
+        foreach ($streamsToAttempt as $streamSource) { // $streamSource is the actual source URL being attempted
+            // Get the title for the current stream source in the loop
             $currentStreamTitle = $type === 'channel'
-                ? ($stream->title_custom ?? $stream->title)
-                : $stream->title;
+                ? ($streamSource->title_custom ?? $streamSource->title)
+                : $streamSource->title;
             $currentStreamTitle = strip_tags($currentStreamTitle);
 
             // Check if playlist is specified for the current stream
-            $playlist = $stream->playlist;
+            $playlist = $streamSource->playlist;
 
-            // Make sure we have a valid source channel (using current stream's ID and its playlist ID)
-            $badSourceCacheKey = ProxyService::BAD_SOURCE_CACHE_PREFIX . $stream->id . ':' . $playlist->id;
+            // Make sure we have a valid source channel (using current streamSource's ID and its playlist ID)
+            $badSourceCacheKey = ProxyService::BAD_SOURCE_CACHE_PREFIX . $streamSource->id . ':' . $playlist->id;
             if (Redis::exists($badSourceCacheKey)) {
-                if ($model->id === $stream->id) {
-                    Log::channel('ffmpeg')->info("Skipping source ID {$currentStreamTitle} ({$stream->id}) for as it was recently marked as bad for playlist {$playlist->id}. Reason: " . (Redis::get($badSourceCacheKey) ?: 'N/A'));
+                if ($model->id === $streamSource->id) { // $model is the original model
+                    Log::channel('ffmpeg')->info("Skipping source ID {$currentStreamTitle} ({$streamSource->id}) for as it was recently marked as bad for playlist {$playlist->id}. Reason: " . (Redis::get($badSourceCacheKey) ?: 'N/A'));
                 } else {
-                    Log::channel('ffmpeg')->info("Skipping Failover {$type} {$stream->name} for source {$model->title} ({$model->id}) as it (stream ID {$stream->id}) was recently marked as bad for playlist {$playlist->id}. Reason: " . (Redis::get($badSourceCacheKey) ?: 'N/A'));
+                    Log::channel('ffmpeg')->info("Skipping Failover {$type} {$currentStreamTitle} (Source ID: {$streamSource->id}) for original model {$model->title} (ID: {$model->id}) as it was recently marked as bad for playlist {$playlist->id}. Reason: " . (Redis::get($badSourceCacheKey) ?: 'N/A'));
                 }
                 continue;
             }
@@ -91,52 +108,53 @@ class HlsStreamService
             if ($this->wouldExceedStreamLimit($playlist->id, $playlist->available_streams, $activeStreams)) {
                 // We're over limit, so decrement and skip
                 $this->decrementActiveStreams($playlist->id);
-                Log::channel('ffmpeg')->info("Max streams reached for playlist {$playlist->name} ({$playlist->id}). Skipping channel {$currentStreamTitle}.");
+                Log::channel('ffmpeg')->info("Max streams reached for playlist {$playlist->name} ({$playlist->id}). Skipping channel {$currentStreamTitle} (Source ID: {$streamSource->id}).");
                 continue;
             }
 
             // URL for the current stream being attempted
             $currentAttemptStreamUrl = $type === 'channel'
-                ? ($stream->url_custom ?? $stream->url) // Use current $stream's URL
-                : $stream->url;
+                ? ($streamSource->url_custom ?? $streamSource->url) // Use current $streamSource's URL
+                : $streamSource->url;
 
             $userAgent = $playlist->user_agent ?? null;
             try {
                 // Pass the ffprobe timeout to runPreCheck
-                // Pass $type and $stream->id for caching stream info
-                $this->runPreCheck($type, $stream->id, $currentAttemptStreamUrl, $userAgent, $currentStreamTitle, $ffprobeTimeout);
+                // Pass $type and $streamSource->id for caching stream info related to this specific source
+                $this->runPreCheck($type, $streamSource->id, $currentAttemptStreamUrl, $userAgent, $currentStreamTitle, $ffprobeTimeout);
 
                 $this->startStreamWithSpeedCheck(
                     type: $type,
-                    model: $stream, // Pass the current $stream object
-                    streamUrl: $currentAttemptStreamUrl, // Pass the URL of the current $stream
-                    title: $currentStreamTitle, // Pass the title of the current $stream
-                    playlistId: $playlist->id,
+                    model: $streamSource, // Pass the current $streamSource object (e.g. a failover channel)
+                    streamUrl: $currentAttemptStreamUrl, // Pass the URL of the current $streamSource
+                    title: $currentStreamTitle, // Pass the title of the current $streamSource
+                    playlistId: $playlist->id, // Playlist ID from the $streamSource
                     userAgent: $userAgent,
+                    originalModelIdToPreservePaths: $originalModelIdToPreservePaths // Pass this down
                 );
-                Log::channel('ffmpeg')->info("Successfully started HLS stream for {$type} {$currentStreamTitle} (ID: {$stream->id}) on playlist {$playlist->id}.");
-                return $stream; // Return the successful stream object
+                Log::channel('ffmpeg')->info("Successfully started HLS stream for {$type} {$currentStreamTitle} (Source ID: {$streamSource->id}, Original Path ID: {$modelIdForPathAndPid}) on playlist {$playlist->id}.");
+                return $streamSource; // Return the successful stream source object
 
             } catch (SourceNotResponding $e) {
                 // Log the error and cache the bad source
                 $this->decrementActiveStreams($playlist->id);
-                Log::channel('ffmpeg')->error("Source not responding for channel {$title}: " . $e->getMessage());
+                Log::channel('ffmpeg')->error("Source not responding for {$type} {$currentStreamTitle} (Source ID {$streamSource->id}) when trying for Original Path ID {$modelIdForPathAndPid}: " . $e->getMessage());
                 Redis::setex($badSourceCacheKey, ProxyService::BAD_SOURCE_CACHE_SECONDS, $e->getMessage());
 
-                // Try the next failover channel
+                // Try the next failover stream source
                 continue;
             } catch (Exception $e) {
                 // Log the error and abort
                 $this->decrementActiveStreams($playlist->id);
-                Log::channel('ffmpeg')->error("Error streaming channel {$title}: " . $e->getMessage());
+                Log::channel('ffmpeg')->error("Error streaming {$type} {$currentStreamTitle} (Source ID {$streamSource->id}) for Original Path ID {$modelIdForPathAndPid}: " . $e->getMessage());
                 Redis::setex($badSourceCacheKey, ProxyService::BAD_SOURCE_CACHE_SECONDS, $e->getMessage());
 
-                // Try the next failover channel
+                // Try the next failover stream source
                 continue;
             }
         }
         // If loop finishes, no stream was successfully started
-        Log::channel('ffmpeg')->error("No available (HLS) streams for {$type} {$title} (Original Model ID: {$model->id}) after trying all sources.");
+        Log::channel('ffmpeg')->error("No available (HLS) streams for {$type} {$title} (Original Model ID for Path: {$idForLogging}) after trying all sources.");
         return null; // Return null if no stream started
     }
 
@@ -149,20 +167,25 @@ class HlsStreamService
      * @param string $title
      * @param int $playlistId
      * @param string|null $userAgent
+     * @param int|null $originalModelIdToPreservePaths If provided, use this ID for HLS paths and PID caching.
      * 
      * @return int The FFmpeg process ID
      * @throws Exception If the stream fails or speed drops below the threshold
      */
     private function startStreamWithSpeedCheck(
         string $type,
-        Channel|Episode $model,
+        Channel|Episode $model, // This is the actual stream source model (e.g. a failover channel)
         string $streamUrl,
         string $title,
         int $playlistId,
         string|null $userAgent,
+        ?int $originalModelIdToPreservePaths = null
     ): int {
+        $idForPaths = $originalModelIdToPreservePaths ?? $model->id;
+        $idOfStreamSource = $model->id; // Actual source of the stream content
+
         // Setup the stream
-        $cmd = $this->buildCmd($type, $model->id, $userAgent, $streamUrl);
+        $cmd = $this->buildCmd($type, $idOfStreamSource, $userAgent, $streamUrl, $idForPaths);
 
         // Use proc_open approach similar to startStream
         $descriptors = [
@@ -172,14 +195,14 @@ class HlsStreamService
         ];
         $pipes = [];
         if ($type === 'episode') {
-            $workingDir = Storage::disk('app')->path("hls/e/{$model->id}");
+            $workingDir = Storage::disk('app')->path("hls/e/{$idForPaths}");
         } else {
-            $workingDir = Storage::disk('app')->path("hls/{$model->id}");
+            $workingDir = Storage::disk('app')->path("hls/{$idForPaths}");
         }
         $process = proc_open($cmd, $descriptors, $pipes, $workingDir);
 
         if (!is_resource($process)) {
-            throw new Exception("Failed to launch FFmpeg for {$title}");
+            throw new Exception("Failed to launch FFmpeg for {$title} (Path ID: {$idForPaths}, Source ID: {$idOfStreamSource})");
         }
 
         // Immediately close stdin/stdout
@@ -193,8 +216,8 @@ class HlsStreamService
         $logger = Log::channel('ffmpeg');
         $stderr = $pipes[2];
 
-        // Get the PID and cache it
-        $cacheKey = "hls:pid:{$type}:{$model->id}";
+        // Get the PID and cache it using $idForPaths
+        $cacheKey = "hls:pid:{$type}:{$idForPaths}";
 
         // Register shutdown function to ensure the pipe is drained
         register_shutdown_function(function () use (
@@ -215,24 +238,24 @@ class HlsStreamService
         // Cache the actual FFmpeg PID
         $status = proc_get_status($process);
         $pid = $status['pid'];
-        // $cacheKey is "hls:pid:{$type}:{$model->id}" which is correct for the PID
-        Cache::forever($cacheKey, $pid);
+        Cache::forever($cacheKey, $pid); // Use $cacheKey which incorporates $idForPaths
 
-        // Store the process start time
-        $startTimeCacheKey = "hls:streaminfo:starttime:{$type}:{$model->id}";
+        // Store the process start time, using $idForPaths for the key
+        $startTimeCacheKey = "hls:streaminfo:starttime:{$type}:{$idForPaths}";
         $currentTime = now()->timestamp;
         Redis::setex($startTimeCacheKey, 604800, $currentTime); // 7 days TTL
-        Log::channel('ffmpeg')->info("Stored ffmpeg process start time for {$type} ID {$model->id} at {$currentTime}");
+        Log::channel('ffmpeg')->info("Stored ffmpeg process start time for {$type} ID {$idForPaths} at {$currentTime}");
 
-        // Record timestamp in Redis (never expires until we prune)
-        // This key represents when the startStream method was last invoked for this model,
-        // which is different from the ffmpeg process actual start time. Keep for now.
-        Redis::set("hls:{$type}_last_seen:{$model->id}", now()->timestamp);
+        // Record timestamp in Redis for the original model (or the model itself if not failover)
+        // $model->id here still refers to the ID of the original model that was requested or failed.
+        // This is handled in the calling startStream method. For active_ids, it should be the original ID.
+        // If $originalModelIdToPreservePaths is null, $idForPaths is $model->id (the source).
+        // If $originalModelIdToPreservePaths is not null, it means $model is a failover source,
+        // and $originalModelIdToPreservePaths is the ID of the stream that died.
+        // The `hls:active_{$type}_ids` should track the ID that the user/system *thinks* is active.
+        // This is correctly set in `startStream` using the initial model's ID.
 
-        // Add to active IDs set
-        Redis::sadd("hls:active_{$type}_ids", $model->id);
-
-        Log::channel('ffmpeg')->info("Streaming {$type} {$title} with command: {$cmd}");
+        Log::channel('ffmpeg')->info("Streaming {$type} {$title} (Source ID: {$idOfStreamSource}, Path ID: {$idForPaths}) with command: {$cmd}");
         return $pid;
     }
 
@@ -464,37 +487,39 @@ class HlsStreamService
     /**
      * Build the FFmpeg command for HLS streaming.
      *
-     * @param string $type
-     * @param string $id
-     * @param string|null $userAgent
-     * @param string $streamUrl
+     * @param string $type Type of stream ('channel' or 'episode')
+     * @param string|int $idOfStreamSource The ID of the actual model providing the stream URL (could be a failover)
+     * @param string|null $userAgent User agent string
+     * @param string $streamUrl The actual URL to stream from
+     * @param string|int $idForHlsPaths The ID to use for constructing HLS file paths and segment URLs (original model ID)
      * 
      * @return string The complete FFmpeg command
      */
     private function buildCmd(
-        $type,
-        $id,
-        $userAgent,
-        $streamUrl
+        string $type,
+        $idOfStreamSource, // Actual source of the stream (e.g. a failover channel's ID)
+        ?string $userAgent,
+        string $streamUrl,
+        $idForHlsPaths     // Original model's ID, for paths
     ): string {
         // Get default stream settings
         $settings = ProxyService::getStreamSettings();
         $customCommandTemplate = $settings['ffmpeg_custom_command_template'] ?? null;
 
-        // Setup the stream file paths
+        // Setup the stream file paths using $idForHlsPaths
         if ($type === 'episode') {
-            $storageDir = Storage::disk('app')->path("hls/e/{$id}");
+            $storageDir = Storage::disk('app')->path("hls/e/{$idForHlsPaths}");
         } else {
-            $storageDir = Storage::disk('app')->path("hls/{$id}");
+            $storageDir = Storage::disk('app')->path("hls/{$idForHlsPaths}");
         }
         File::ensureDirectoryExists($storageDir, 0755);
 
-        // Setup the stream URL
+        // Setup the stream URL elements using $idForHlsPaths
         $m3uPlaylist = "{$storageDir}/stream.m3u8";
         $segment = "{$storageDir}/segment_%03d.ts";
         $segmentBaseUrl = $type === 'channel'
-            ? url("/api/stream/{$id}") . '/'
-            : url("/api/stream/e/{$id}") . '/';
+            ? url("/api/stream/{$idForHlsPaths}") . '/'
+            : url("/api/stream/e/{$idForHlsPaths}") . '/';
 
         // Get ffmpeg path
         $ffmpegPath = config('proxy.ffmpeg_path') ?: $settings['ffmpeg_path'];
@@ -574,7 +599,7 @@ class HlsStreamService
                     $codecSpecificArgs = trim($qsvEncoderOptions) . " ";
                 } else {
                     // Default QSV encoder options for HLS if not set by user
-                    $codecSpecificArgs = "-preset medium -global_quality 23 "; // Ensure trailing space
+                    $codecSpecificArgs = "-look_ahead 0 "; // Ensure trailing space
                 }
                 if (!empty($qsvAdditionalArgs)) {
                     $userArgs = trim($qsvAdditionalArgs) . ($userArgs ? " " . $userArgs : "");

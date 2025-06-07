@@ -1,6 +1,7 @@
 <?php
 
 use Illuminate\Support\Facades\Schedule;
+use App\Settings\GeneralSettings; // Added for live_failover_enabled check
 
 /*
  * Register schedules

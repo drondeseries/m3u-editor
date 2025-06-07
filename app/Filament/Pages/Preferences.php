@@ -124,6 +124,20 @@ class Preferences extends SettingsPage
                                             ->helperText('Seconds to sleep between playlist checks. Default: 1.0s.'),
 
                                     ]),
+                                Forms\Components\Section::make('Live Failover')
+                                    ->description('Configure automatic failover for live HLS streams.')
+                                    ->schema([
+                                        Forms\Components\Toggle::make('live_failover_enabled')
+                                            ->label('Enable Live Failover')
+                                            ->helperText('If enabled, the system will monitor active HLS streams and attempt to switch to a failover source if the primary stream crashes.')
+                                            ->default(false), // Default to false
+                                        Forms\Components\TextInput::make('live_failover_monitor_interval_seconds')
+                                            ->label('Monitor Interval (seconds)')
+                                            ->numeric()
+                                            ->minValue(5) // Sensible minimum
+                                            ->default(30)
+                                            ->helperText('How often to check the status of active streams for potential failover. Minimum: 5 seconds.'),
+                                    ])->columns(2), // Adjust columns as needed
                                 Forms\Components\Section::make('Advanced FFmpeg Settings')
                                     ->description('These settings allow you to customize the FFmpeg transcoding process. Use with caution, as incorrect settings can lead to poor performance or compatibility issues.')
                                     ->schema([

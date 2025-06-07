@@ -40,6 +40,10 @@ class GeneralSettings extends Settings
     public ?string $ffmpeg_qsv_encoder_options = null;
     public ?string $ffmpeg_qsv_additional_args = null;
 
+    // Live Failover Settings
+    public bool $live_failover_enabled = true; // Changed for testing
+    public int $live_failover_monitor_interval_seconds = 15; // Changed for testing
+
     public static function group(): string
     {
         return 'general';
