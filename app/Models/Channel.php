@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasManyThrough;
 use Illuminate\Support\Facades\Log;
 use Symfony\Component\Process\Process as SymfonyProcess;
@@ -67,16 +68,24 @@ class Channel extends Model
         return $this->hasMany(ChannelFailover::class, 'channel_id');
     }
 
-    public function failoverChannels(): HasManyThrough
+    // public function failoverChannels(): HasManyThrough
+    // {
+    //     return $this->hasManyThrough(
+    //         Channel::class, // Deploy
+    //         ChannelFailover::class, // Environment
+    //         'channel_id', // Foreign key on the environments table...
+    //         'id', // Foreign key on the deployments table...
+    //         'id', // Local key on the projects table...
+    //         'channel_failover_id' // Local key on the environments table...
+    //     )->orderBy('channel_failovers.sort');
+    // }
+
+    /**
+     * Get the stream sources for the channel, ordered by priority.
+     */
+    public function streamSources(): HasMany
     {
-        return $this->hasManyThrough(
-            Channel::class, // Deploy
-            ChannelFailover::class, // Environment
-            'channel_id', // Foreign key on the environments table...
-            'id', // Foreign key on the deployments table...
-            'id', // Local key on the projects table...
-            'channel_failover_id' // Local key on the environments table...
-        )->orderBy('channel_failovers.sort');
+        return $this->hasMany(ChannelStreamSource::class)->orderBy('priority');
     }
 
     /**
