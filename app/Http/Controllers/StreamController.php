@@ -45,7 +45,8 @@ class StreamController extends Controller
 
         // Get the failover channels (if any)
         $sourceChannel = $channel;
-        $streams = collect([$channel])->concat($channel->failoverChannels);
+        $failoverSources = $channel->failoverChannels ?? [];
+        $streams = collect([$channel])->concat($failoverSources);
         $streamCount = $streams->count();
 
         // Loop over the failover channels and grab the first one that works.
