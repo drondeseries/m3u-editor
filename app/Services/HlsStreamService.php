@@ -585,7 +585,7 @@ class HlsStreamService
                     $codecSpecificArgs = trim($qsvEncoderOptions) . " ";
                 } else {
                     // Default QSV encoder options for HLS if not set by user
-                    $codecSpecificArgs = "-preset medium -global_quality 23 "; // Ensure trailing space
+                    $codecSpecificArgs = "-global_quality 23 "; // Ensure trailing space
                 }
                 if (!empty($qsvAdditionalArgs)) {
                     $userArgs = trim($qsvAdditionalArgs) . ($userArgs ? " " . $userArgs : "");
@@ -638,8 +638,8 @@ class HlsStreamService
             $cmd .= '-i ' . escapeshellarg($streamUrl) . ' ';
             $cmd .= $videoFilterArgs; // e.g., -vf 'scale_vaapi=format=nv12' or -vf 'vpp_qsv=format=nv12'
 
-            $cmd .= $outputFormat . ' ';
-            $cmd .= '-fps_mode cfr '; // Add the vsync flag here
+            $cmd .= trim($outputFormat) . ' ';
+            $cmd .= '-fps_mode cfr ';
         } else {
             // Custom command template is provided
             $cmd = $customCommandTemplate;
