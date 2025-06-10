@@ -635,6 +635,7 @@ class HlsStreamService
                 '-reconnect_delay_max 2 -noautorotate ';
 
             $cmd .= $userArgs; // User-defined global args from config/proxy.php or QSV additional args
+            $cmd .= '-reconnect_at_eof 1 ';
             $cmd .= '-i ' . escapeshellarg($streamUrl) . ' ';
             $cmd .= $videoFilterArgs; // e.g., -vf 'scale_vaapi=format=nv12' or -vf 'vpp_qsv=format=nv12'
 
