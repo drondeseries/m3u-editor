@@ -572,7 +572,7 @@ class HlsStreamService
 
                 $hwaccelInitArgs = "-init_hw_device qsv={$qsvDeviceName}:{$qsvDevice} ";
                 // These args are for full hardware acceleration (decode using QSV)
-                $hwaccelInputArgs = "-hwaccel qsv -hwaccel_device {$qsvDeviceName} ";
+                $hwaccelInputArgs = "-hwaccel qsv -hwaccel_device {$qsvDeviceName} -hwaccel_output_format qsv ";
 
                 if (!empty($qsvFilterFromSettings)) {
                     // This filter is applied to frames already in QSV format
