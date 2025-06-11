@@ -79,6 +79,25 @@ Run the database migrations:
 php artisan migrate
 ```
 
+**Important Note on Idempotency and `channels` Table:**
+The migration files, including those for `channels`, `channel_streams`, and `user_stream_sessions`, have been updated to be idempotent. This means they check if a table already exists before attempting to create it (and use `dropIfExists` for rollbacks). This helps prevent "Duplicate table" errors if migrations are run multiple times.
+
+**CRITICAL: Schema Conflict for `channels` Table**
+Two migration files exist that both attempt to create a `channels` table, but with different schemas:
+1.  `database/migrations/2023_10_26_000000_create_channels_table.php` (related to the HLS failover feature, includes `active_channel_stream_id`)
+2.  `database/migrations/2024_12_19_154249_create_channels_table.php` (appears to be for general channel/playlist management with a more extensive schema).
+
+Both have been made idempotent to prevent immediate migration errors. However, this means:
+*   If the `channels` table does not exist, the schema created will depend on which of these two migrations runs first.
+*   If the `channels` table *does* exist, neither migration will now alter its schema.
+
+**Action Required by Developer:**
+You MUST review these two migration files and decide on the correct, canonical schema for the `channels` table.
+*   If the `2023_10_26_...` schema is correct for the HLS failover and is the intended base, the `2024_12_19_...` migration might need to be removed, or its unique columns merged into the 2023 migration if they are also needed.
+*   If the `2024_12_19_...` schema is the correct one, then the `active_channel_stream_id` column (and its foreign key definition from `2023_10_26_000003_add_active_channel_stream_foreign_key_to_channels_table.php`) MUST be added to the `2024_12_19_...` migration's schema, and the `2023_10_26_000000_create_channels_table.php` should likely be removed or its content commented out.
+*   The HLS failover system relies on the `active_channel_stream_id` column being present in the `channels` table and correctly linked via foreign key to the `channel_streams` table.
+Please resolve this schema conflict before deploying to production to ensure data integrity and correct feature operation.
+
 ### d. Queue Workers
 Queue workers are essential for processing stream startups, monitoring, and recovery tasks.
 *   Ensure your `QUEUE_CONNECTION` in `.env` is set to `database`, `redis`, or another async driver for production.

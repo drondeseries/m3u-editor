@@ -11,10 +11,11 @@ return new class extends Migration
      */
     public function up(): void
     {
-        Schema::create('channel_streams', function (Blueprint $table) {
-            $table->id(); // bigIncrements is the default for id()
-            $table->foreignId('channel_id')->constrained('channels')->onDelete('cascade');
-            $table->string('provider_name')->nullable();
+        if (!Schema::hasTable('channel_streams')) {
+            Schema::create('channel_streams', function (Blueprint $table) {
+                $table->id(); // bigIncrements is the default for id()
+                $table->foreignId('channel_id')->constrained('channels')->onDelete('cascade');
+                $table->string('provider_name')->nullable();
             $table->text('stream_url');
             $table->integer('priority')->default(0);
             $table->string('status')->default('active')->index();

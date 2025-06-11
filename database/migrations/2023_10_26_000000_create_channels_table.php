@@ -11,13 +11,15 @@ return new class extends Migration
      */
     public function up(): void
     {
-        Schema::create('channels', function (Blueprint $table) {
-            $table->id(); // bigIncrements is the default for id()
-            $table->string('name');
-            $table->unsignedBigInteger('active_channel_stream_id')->nullable();
-            // Foreign key will be added in a separate migration
-            $table->timestamps();
-        });
+        if (!Schema::hasTable('channels')) {
+            Schema::create('channels', function (Blueprint $table) {
+                $table->id(); // bigIncrements is the default for id()
+                $table->string('name');
+                $table->unsignedBigInteger('active_channel_stream_id')->nullable();
+                // Foreign key will be added in a separate migration
+                $table->timestamps();
+            });
+        }
     }
 
     /**
