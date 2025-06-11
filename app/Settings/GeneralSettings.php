@@ -39,6 +39,8 @@ class GeneralSettings extends Settings
     public ?string $ffmpeg_qsv_video_filter = null;
     public ?string $ffmpeg_qsv_encoder_options = null;
     public ?string $ffmpeg_qsv_additional_args = null;
+    public ?int $failed_status_reset_timeout_minutes = 5;
+    public ?int $ffmpeg_graceful_shutdown_timeout_seconds = 10;
 
     public static function group(): string
     {

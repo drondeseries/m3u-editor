@@ -77,6 +77,7 @@ class InitiateFailoverJob implements ShouldQueue
                 Log::warning("{$logPrefix} No active stream providers found. Setting channel status to 'failed'.");
                 $channel->stream_status = 'failed';
                 $channel->current_stream_provider_id = null;
+                $channel->failed_at = now();
                 $channel->save();
                 Log::info("{$logPrefix} Job finished: No active providers.");
                 return;
@@ -94,6 +95,8 @@ class InitiateFailoverJob implements ShouldQueue
             if ($eligibleProviders->isEmpty()) {
                 Log::warning("{$logPrefix} No eligible providers to failover to after excluding failed_provider_id: {$this->failed_provider_id}. Setting channel status to 'failed'.");
                 $channel->stream_status = 'failed';
+                $channel->current_stream_provider_id = null;
+                $channel->failed_at = now();
                 $channel->save();
                 Log::info("{$logPrefix} Job finished: No eligible providers left.");
                 return;
@@ -142,7 +145,8 @@ class InitiateFailoverJob implements ShouldQueue
             if (!$switched) {
                 Log::critical("{$logPrefix} All eligible stream providers failed. Setting channel stream_status to 'failed'. No working provider found.");
                 $channel->stream_status = 'failed';
-                // $channel->current_stream_provider_id = null; // Keep last attempted for context or nullify? For now, keep.
+                $channel->current_stream_provider_id = null;
+                $channel->failed_at = now();
                 $channel->save();
             }
             // Refresh channel for final status log
@@ -170,7 +174,8 @@ class InitiateFailoverJob implements ShouldQueue
             // If the job itself fails critically, ensure channel is marked as failed.
             if ($channel->stream_status !== 'failed') {
                  $channel->stream_status = 'failed';
-                 // $channel->current_stream_provider_id = null; // Consider if nullifying is best here
+                 $channel->current_stream_provider_id = null;
+                 $channel->failed_at = now();
                  $channel->save();
                  Log::error("InitiateFailoverJob: {$channelLogName} stream_status set to 'failed' due to unhandled job exception in InitiateFailoverJob::failed().");
             }

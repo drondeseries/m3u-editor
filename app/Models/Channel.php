@@ -48,6 +48,7 @@ class Channel extends Model
         'auto_channel_output_option',
         'current_stream_provider_id',
         'stream_status',
+        'failed_at',
         // Add other fillable attributes as needed
     ];
 
@@ -70,6 +71,7 @@ class Channel extends Model
         'current_stream_provider_id' => 'integer',
         'icon_preference_enabled' => 'boolean',
         'editable_attributes' => 'array',
+        'failed_at' => 'datetime',
     ];
 
     public function user(): BelongsTo

@@ -75,6 +75,7 @@ class HlsStreamService
                 Log::error("HlsStreamService: No active stream providers available for channel {$channel->id} ('{$originalChannelTitle}'). Cannot start stream.");
                 $channel->stream_status = 'failed';
                 $channel->current_stream_provider_id = null;
+                $channel->failed_at = now();
                 $channel->save();
                 return null;
             }
@@ -169,6 +170,7 @@ class HlsStreamService
             Log::error("HlsStreamService: All providers failed for channel {$channel->id} ('{$originalChannelTitle}'). Setting channel status to 'failed'.");
             $channel->stream_status = 'failed';
             $channel->current_stream_provider_id = null;
+            $channel->failed_at = now();
             $channel->save();
             return null;
 
@@ -799,7 +801,7 @@ class HlsStreamService
             $cmd .= $videoFilterArgs; // e.g., -vf 'scale_vaapi=format=nv12' or -vf 'vpp_qsv=format=nv12'
 
             $cmd .= $outputFormat . ' ';
-            $cmd .= '-vsync cfr '; // Add the vsync flag here
+            $cmd .= '-fps_mode passthrough '; // Add the fps_mode flag here
         } else {
             // Custom command template is provided
             $cmd = $customCommandTemplate;

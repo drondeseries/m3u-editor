@@ -115,10 +115,22 @@ class HlsStreamController extends Controller
         $m3u8Path = Storage::disk('app')->path("hls/{$channelId}/stream.m3u8");
         $nginxRedirectPath = "/internal/hls/{$channelId}/stream.m3u8";
 
+        $settings = app(GeneralSettings::class);
+
         // Initial state check
         if ($channel->stream_status === 'failed') {
-            Log::warning("HLS Playlist Logic: Channel {$channelId} ('{$originalChannelName}') initial status is 'failed'. Aborting with 503.");
-            abort(503, 'Stream is currently unavailable (status: failed).');
+            $failedStatusResetTimeoutMinutes = $settings->failed_status_reset_timeout_minutes ?? 5;
+
+            if ($channel->failed_at && now()->subMinutes($failedStatusResetTimeoutMinutes)->gt($channel->failed_at)) {
+                Log::info("HLS Playlist Logic: Channel {$channelId} ('{$originalChannelName}') 'failed' status is older than {$failedStatusResetTimeoutMinutes} minutes. Resetting status to allow retry.");
+                $channel->stream_status = null; // Or 'offline' - null should trigger a fresh start
+                $channel->failed_at = null;
+                $channel->save();
+                Log::info("HLS Playlist Logic: Channel {$channelId} ('{$originalChannelName}') status reset. Proceeding with stream attempt.");
+            } else {
+                Log::warning("HLS Playlist Logic: Channel {$channelId} ('{$originalChannelName}') initial status is 'failed' and still within the {$failedStatusResetTimeoutMinutes} minute timeout. Aborting with 503.");
+                abort(503, 'Stream is currently unavailable (status: failed).');
+            }
         }
 
         $isRunning = $this->hlsService->isRunning('channel', $channelId);
