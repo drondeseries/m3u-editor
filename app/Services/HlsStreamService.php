@@ -534,11 +534,13 @@ class HlsStreamService
 
         if (!empty($customHeaders)) {
             $finalHeaders = $customHeaders;
+            // Ensure User-Agent from $userAgent is added if not already present in $customHeaders
             if ($userAgent && !isset($finalHeaders['User-Agent']) && !isset($finalHeaders['user-agent'])) {
                  $finalHeaders['User-Agent'] = $userAgent;
             }
             $request->withHeaders($finalHeaders);
         } elseif ($userAgent) {
+            // If no custom headers, but a user agent is provided, use it
             $request->withUserAgent($userAgent);
         }
 
