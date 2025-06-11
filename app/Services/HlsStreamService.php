@@ -246,7 +246,7 @@ class HlsStreamService
         fclose($pipes[0]);
         fclose($pipes[1]);
         stream_set_blocking($pipes[2], false);
-        $logger = Log::channel('ffmpeg'); // Reverted to Log::channel('ffmpeg')
+        $logger = Log::channel('ffmpeg');
         $stderr = $pipes[2];
         $cacheKey = "hls:pid:{$type}:{$model->id}";
 
@@ -533,9 +533,15 @@ class HlsStreamService
         $request = Http::retry($maxRetries, 100)->timeout($timeoutSeconds);
 
         if (!empty($customHeaders)) {
-            $finalHeaders = $customHeaders;
-            // Ensure User-Agent from $userAgent is added if not already present in $customHeaders
-            if ($userAgent && !isset($finalHeaders['User-Agent']) && !isset($finalHeaders['user-agent'])) {
+            $finalHeaders = $customHeaders; // Local copy to modify if needed
+
+            // Check if User-Agent needs to be added
+            $userAgentKeyExists = false;
+            if (isset($finalHeaders['User-Agent']) || isset($finalHeaders['user-agent'])) {
+                $userAgentKeyExists = true;
+            }
+
+            if ($userAgent && !$userAgentKeyExists) {
                  $finalHeaders['User-Agent'] = $userAgent;
             }
             $request->withHeaders($finalHeaders);
