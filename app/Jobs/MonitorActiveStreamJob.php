@@ -63,7 +63,7 @@ class MonitorActiveStreamJob implements ShouldQueue //, ShouldBeUnique
                 return;
             }
 
-            $playlistUserAgent = $model->playlist->user_agent ?? null;
+            $playlistUserAgent = isset($model->playlist->user_agent) ? $model->playlist->user_agent : null;
 
             $activeUrlRedisKey = "hls:active_url:{$this->streamType}:{$this->channelId}";
             $currentActiveUrl = Redis::get($activeUrlRedisKey);
@@ -78,7 +78,7 @@ class MonitorActiveStreamJob implements ShouldQueue //, ShouldBeUnique
 
             // For URL monitoring, custom headers for performHealthCheck would typically be null unless they are globally defined for the channel/episode
             $healthCheckResult = $hlsStreamService->performHealthCheck($this->monitoringUrl, null, $playlistUserAgent);
-            $status = $healthCheckResult['status'] ?? 'unknown_error';
+            $status = isset($healthCheckResult['status']) ? $healthCheckResult['status'] : 'unknown_error';
 
             $failureCountKey = "hls:url_failures:" . md5($this->monitoringUrl);
             $stallCountKey = "hls:url_stalls:" . md5($this->monitoringUrl);
@@ -91,7 +91,8 @@ class MonitorActiveStreamJob implements ShouldQueue //, ShouldBeUnique
                 $maxFailures = Config::get('failover.max_consecutive_url_failures', 3);
                 $retryDelay = Config::get('failover.monitoring_retry_delay', 5);
 
-                Log::channel('monitor_stream')->warning("MonitorActiveStreamJob: Health check failed for URL {$this->monitoringUrl} ({$this->streamType} ID {$this->channelId}). Status: {$status}, Failures: {$currentFailures}. Message: {$healthCheckResult['message'] ?? 'N/A'}");
+                $logMessageContent = isset($healthCheckResult['message']) ? $healthCheckResult['message'] : 'N/A';
+                Log::channel('monitor_stream')->warning("MonitorActiveStreamJob: Health check failed for URL {$this->monitoringUrl} ({$this->streamType} ID {$this->channelId}). Status: {$status}, Failures: {$currentFailures}. Message: {$logMessageContent}");
 
                 if ($currentFailures >= $maxFailures) {
                     Log::channel('monitor_stream')->error("MonitorActiveStreamJob: URL {$this->monitoringUrl} ({$this->streamType} ID {$this->channelId}) reached max failures ({$currentFailures}). Dispatching HandleStreamFailoverJob.");
@@ -108,7 +109,7 @@ class MonitorActiveStreamJob implements ShouldQueue //, ShouldBeUnique
             if ($status === 'ok') {
                 $previousManifestStateJson = Redis::get($manifestStateKey);
                 $previousManifestState = $previousManifestStateJson ? json_decode($previousManifestStateJson, true) : null;
-                $currentMediaSequence = $healthCheckResult['media_sequence'] ?? null;
+                $currentMediaSequence = isset($healthCheckResult['media_sequence']) ? $healthCheckResult['media_sequence'] : null;
                 $monitoringInterval = Config::get('failover.monitoring_interval', 7);
                 $maxStallCounts = Config::get('failover.max_stall_counts', 3);
 
