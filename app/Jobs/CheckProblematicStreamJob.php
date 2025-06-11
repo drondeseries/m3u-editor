@@ -50,7 +50,7 @@ class CheckProblematicStreamJob implements ShouldQueue
         // Construct a detailed name for logging early, check for null channel first
         $channelNameForLog = "channel " . ($channel ? $channel->id . " ('" . strip_tags($channel->title_custom ?? $channel->title) . "')" : "UNKNOWN_CHANNEL");
         $providerLogName = "provider {$streamProvider->id} ('{$streamProvider->provider_name}', URL: {$streamProvider->stream_url}) for {$channelNameForLog}";
-        $logPrefix = "CheckProblematicStreamJob: [{$providerLogName}, attempt: {$this->attempts()}]";
+        $logPrefix = "CheckProblematicStreamJob: [{$providerLogName}, attempt: {$this->attempts()}]"; // Updated log prefix
 
 
         if (!$channel) {
@@ -86,11 +86,12 @@ class CheckProblematicStreamJob implements ShouldQueue
         }
 
         $oldStatus = $streamProvider->status;
-        if ($oldStatus !== $newStatus || $exceptionMessage) {
+        if ($oldStatus !== $newStatus || $exceptionMessage) { // Log more explicitly if status changes or an error occurred
             Log::info("{$logPrefix} Status changing from '{$oldStatus}' to '{$newStatus}'.", $exceptionMessage ? ['error' => $exceptionMessage] : []);
         }
         $streamProvider->status = $newStatus;
         $streamProvider->save();
+
 
         if ($newStatus === 'online') {
             Log::info("{$logPrefix} Provider has recovered and is now 'online'.");
@@ -106,9 +107,9 @@ class CheckProblematicStreamJob implements ShouldQueue
                 } else if (!$currentActiveProvider) {
                     Log::info("{$logPrefix} Recovered provider is online. {$channelNameForLog} has no current_stream_provider_id set. Current channel status: {$channel->stream_status}.");
                 } else {
-                     Log::info("{$logPrefix} Recovered provider is online, but current active provider {$currentActiveProvider->id} for {$channelNameForLog} has same or higher priority, or channel is not in a failed state.");
+                     Log::info("{$logPrefix} Recovered provider is online, but current active provider {$currentActiveProvider->id} for {$channelNameForLog} has same or higher priority, or channel is not in a 'failed' state.");
                 }
-            } else {
+            } else { // Recovered provider IS the current active provider for the channel
                  if ($channel->stream_status !== 'playing') {
                      $channel->stream_status = 'playing';
                      $channel->save();
@@ -135,16 +136,18 @@ class CheckProblematicStreamJob implements ShouldQueue
      */
     public function failed(Throwable $exception): void
     {
+        // Attempt to get provider details for logging, if possible
         $providerInfoForLog = "stream_provider_id: {$this->stream_provider_id}";
         try {
-            $streamProvider = ChannelStreamProvider::with('channel')->find($this->stream_provider_id);
+            // Note: Accessing relationships like $streamProvider->channel might fail if the job is failing due to DB issues.
+            $streamProvider = ChannelStreamProvider::find($this->stream_provider_id); // Avoid loading relations here if not essential for logging context
             if ($streamProvider) {
                 $providerNamePart = "'{$streamProvider->provider_name}'";
-                $channelNamePart = $streamProvider->channel ? "'" . strip_tags($streamProvider->channel->title_custom ?? $streamProvider->channel->title) . "'" : "unknown channel";
-                $providerInfoForLog = "provider {$streamProvider->id} ({$providerNamePart}, URL: {$streamProvider->stream_url}) for channel " . ($streamProvider->channel_id ?? 'N/A') . " ({$channelNamePart})";
+                $channelIdForLog = $streamProvider->channel_id ?? 'N/A'; // Use direct attribute
+                $providerInfoForLog = "provider {$streamProvider->id} ({$providerNamePart}, URL: {$streamProvider->stream_url}) for channel {$channelIdForLog}";
             }
         } catch (Throwable $e) {
-            // Ignore error during logging enhancement in failed method
+            Log::warning("CheckProblematicStreamJob: Could not fetch provider details during failed() method: " . $e->getMessage());
         }
 
         Log::critical("CheckProblematicStreamJob: CRITICAL JOB FAILURE for {$providerInfoForLog}. Error: {$exception->getMessage()}", [
