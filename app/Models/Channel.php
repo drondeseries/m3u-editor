@@ -81,14 +81,6 @@ class Channel extends Model
     // }
 
     /**
-     * Get the stream sources for the channel, ordered by priority.
-     */
-    public function streamSources(): HasMany
-    {
-        return $this->hasMany(ChannelStreamSource::class)->orderBy('priority');
-    }
-
-    /**
      * The attributes that are mass assignable.
      *
      * @var string

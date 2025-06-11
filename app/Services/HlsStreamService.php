@@ -7,8 +7,8 @@ use App\Models\Channel;
 use App\Models\Episode;
 use App\Exceptions\SourceNotResponding;
 use App\Traits\TracksActiveStreams;
-use App\Models\ChannelStreamSource;
-use App\Jobs\MonitorActiveStreamJob;
+// Removed: use App\Models\ChannelStreamSource;
+use App\Jobs\MonitorActiveStreamJob; // MonitorActiveStreamJob constructor will need update later
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Log;
@@ -38,146 +38,239 @@ class HlsStreamService
         $streamSettings = ProxyService::getStreamSettings();
         $ffprobeTimeout = $streamSettings['ffmpeg_ffprobe_timeout'] ?? 5; // Default to 5 if not set
 
+        // Get stream settings, including the ffprobe timeout
+        $streamSettings = ProxyService::getStreamSettings();
+        $ffprobeTimeout = $streamSettings['ffmpeg_ffprobe_timeout'] ?? 5; // Default to 5 if not set
+
         // Check if the requested model is already running
         if ($this->isRunning($type, $model->id)) {
-            $activeSourceId = Redis::get("hls:active_source:{$type}:{$model->id}");
-            $activeStreamSource = $activeSourceId ? ChannelStreamSource::find($activeSourceId) : null;
-            $streamTitleToLog = $activeStreamSource ? $activeStreamSource->provider_name : $title;
-
-            Log::channel('ffmpeg')->debug("HLS Stream: Found existing running stream for $type ID {$model->id} (Source: {$streamTitleToLog}) - reusing for original request {$model->id} ({$title}).");
-            if ($activeStreamSource) {
-                 MonitorActiveStreamJob::dispatch($model->id, $activeStreamSource->id, null);
+            $activeUrl = Redis::get("hls:active_url:{$type}:{$model->id}"); // Changed from active_source
+            Log::channel('ffmpeg')->debug("HLS Stream: Found existing running stream for $type ID {$model->id} (URL: {$activeUrl}) - reusing for original request {$model->id} ({$title}).");
+            // Assuming MonitorActiveStreamJob is already running for this active URL or will be re-triggered by client activity.
+            if ($activeUrl) {
+                 // The MonitorActiveStreamJob constructor signature will change later.
+                 // For now, conceptually passing $model->id, $activeUrl, $type, null
+                 MonitorActiveStreamJob::dispatch($model->id, $activeUrl, $type, null);
             }
             return $model;
         }
 
-        $streamSources = $model->streamSources()->where('is_enabled', true)->orderBy('priority')->get();
+        $urlsToTry = [];
+        $primaryUrl = ($type === 'channel') ? ($model->url_custom ?? $model->url) : $model->url;
+        if ($primaryUrl) {
+            // Storing URL and a descriptive title for logging
+            $urlsToTry[] = ['url' => $primaryUrl, 'title_desc' => $title . " (Primary)"];
+        }
 
-        if ($streamSources->isEmpty()) {
-            Log::channel('ffmpeg')->error("No enabled stream sources found for {$type} {$title} (ID: {$model->id}).");
+        if ($type === 'channel' && method_exists($model, 'failoverChannels')) {
+            // Ensure failoverChannels is iterable, defaulting to an empty array if null
+            $failoverChannels = $model->failoverChannels ?? [];
+            foreach ($failoverChannels as $failoverChannel) {
+                $url = $failoverChannel->url_custom ?? $failoverChannel->url;
+                if ($url) {
+                    $urlsToTry[] = ['url' => $url, 'title_desc' => ($failoverChannel->title_custom ?? $failoverChannel->title) . " (Failover for Channel ID {$model->id})"];
+                }
+            }
+        }
+
+        if (empty($urlsToTry)) {
+            Log::channel('ffmpeg')->error("No stream URLs (primary or failover) found for {$type} {$title} (ID: {$model->id}).");
             return null;
         }
 
         Redis::set("hls:{$type}_last_seen:{$model->id}", now()->timestamp);
         Redis::sadd("hls:active_{$type}_ids", $model->id);
 
-        foreach ($streamSources as $streamSource) {
-            $currentStreamTitle = $streamSource->provider_name ?? "Source ID {$streamSource->id}";
-            $playlist = $model->playlist;
+        // The playlist is associated with the primary $model (Channel or Episode)
+        $playlist = $model->playlist;
+        if (!$playlist) {
+            Log::channel('ffmpeg')->error("Playlist not found for {$type} {$title} (ID: {$model->id}). Cannot proceed.");
+            // Decrement active stream if it was incremented before this check in a real scenario
+            Redis::srem("hls:active_{$type}_ids", $model->id); // Clean up active ID
+            return null;
+        }
+        $userAgent = $playlist->user_agent ?? null;
 
-            $badSourceCacheKey = ProxyService::BAD_SOURCE_CACHE_PREFIX . $streamSource->id . ':' . $playlist->id;
+        foreach ($urlsToTry as $streamData) {
+            $currentUrl = $streamData['url'];
+            $currentStreamLogTitle = $streamData['title_desc']; // For logging purposes
+
+            // Bad source cache key based on URL and playlist
+            $badSourceCacheKey = ProxyService::BAD_SOURCE_CACHE_PREFIX . md5($currentUrl) . ':' . $playlist->id;
             if (Redis::exists($badSourceCacheKey)) {
-                Log::channel('ffmpeg')->debug("Skipping stream source {$currentStreamTitle} (ID: {$streamSource->id}) for {$type} {$title} as it was recently marked as bad for playlist {$playlist->id}. Reason: " . (Redis::get($badSourceCacheKey) ?: 'N/A'));
+                Log::channel('ffmpeg')->debug("Skipping URL {$currentUrl} for {$type} '{$title}' as it was recently marked as bad for playlist {$playlist->id}. Reason: " . (Redis::get($badSourceCacheKey) ?: 'N/A'));
                 continue;
             }
 
             $activeStreams = $this->incrementActiveStreams($playlist->id);
             if ($this->wouldExceedStreamLimit($playlist->id, $playlist->available_streams, $activeStreams)) {
                 $this->decrementActiveStreams($playlist->id);
-                Log::channel('ffmpeg')->debug("Max streams reached for playlist {$playlist->name} ({$playlist->id}). Skipping source {$currentStreamTitle} for {$type} {$title}.");
+                Log::channel('ffmpeg')->debug("Max streams reached for playlist {$playlist->name} ({$playlist->id}). Skipping URL {$currentUrl} for {$type} '{$title}'.");
                 continue;
             }
 
-            $userAgent = $playlist->user_agent ?? null;
-            $customHeaders = $streamSource->custom_headers ?? null;
+            // Custom headers are not directly available per URL from the Channel/FailoverChannel model itself.
+            // If custom headers were tied to the main channel, they could be $model->custom_headers.
+            // For this refactor, we'll assume no specific custom headers per failover URL.
+            $customHeaders = null; // Or potentially $model->custom_headers if that's the intended logic
 
             try {
-                $this->runPreCheck($type, $model->id, $streamSource->stream_url, $userAgent, $currentStreamTitle, $ffprobeTimeout, $customHeaders);
+                // Use $currentStreamLogTitle for logging in runPreCheck
+                $this->runPreCheck($type, $model->id, $currentUrl, $userAgent, $currentStreamLogTitle, $ffprobeTimeout, $customHeaders);
+
                 $this->startStreamWithSpeedCheck(
                     type: $type,
-                    model: $model,
-                    streamUrl: $streamSource->stream_url,
-                    title: $title,
+                    model: $model, // Original model
+                    streamUrl: $currentUrl,
+                    title: $title, // Original title for logging consistency
                     playlistId: $playlist->id,
                     userAgent: $userAgent,
                     customHeaders: $customHeaders
                 );
 
-                Redis::set("hls:active_source:{$type}:{$model->id}", $streamSource->id);
-                MonitorActiveStreamJob::dispatch($model->id, $streamSource->id, null);
+                Redis::set("hls:active_url:{$type}:{$model->id}", $currentUrl); // Changed from active_source
+                // Adapt MonitorActiveStreamJob dispatch: needs channelId, URL, type, userId
+                MonitorActiveStreamJob::dispatch($model->id, $currentUrl, $type, null /* userId */);
 
-                $streamSource->update(['status' => 'active', 'consecutive_failures' => 0, 'last_checked_at' => now()]);
-
-                Log::channel('ffmpeg')->debug("Successfully started HLS stream for {$type} {$title} (ID: {$model->id}) using source {$currentStreamTitle} (ID: {$streamSource->id}) on playlist {$playlist->id}.");
+                Log::channel('ffmpeg')->debug("Successfully started HLS stream for {$type} '{$title}' (ID: {$model->id}) using URL {$currentUrl}.");
                 return $model;
 
             } catch (SourceNotResponding $e) {
                 $this->decrementActiveStreams($playlist->id);
-                Log::channel('ffmpeg')->error("Source not responding for {$type} {$title} with source {$currentStreamTitle} (ID: {$streamSource->id}): " . $e->getMessage());
+                Log::channel('ffmpeg')->error("Source not responding for {$type} '{$title}' with URL {$currentUrl}: " . $e->getMessage());
                 Redis::setex($badSourceCacheKey, ProxyService::BAD_SOURCE_CACHE_SECONDS, $e->getMessage());
-                $streamSource->increment('consecutive_failures');
-                $streamSource->update(['status' => 'problematic', 'last_failed_at' => now(), 'last_checked_at' => now()]);
                 continue;
             } catch (Exception $e) {
                 $this->decrementActiveStreams($playlist->id);
-                Log::channel('ffmpeg')->error("Error streaming {$type} {$title} with source {$currentStreamTitle} (ID: {$streamSource->id}): " . $e->getMessage());
+                Log::channel('ffmpeg')->error("Error streaming {$type} '{$title}' with URL {$currentUrl}: " . $e->getMessage());
                 Redis::setex($badSourceCacheKey, ProxyService::BAD_SOURCE_CACHE_SECONDS, $e->getMessage());
-                $streamSource->increment('consecutive_failures');
-                $streamSource->update(['status' => 'down', 'last_failed_at' => now(), 'last_checked_at' => now()]);
                 continue;
             }
         }
 
-        Log::channel('ffmpeg')->error("No available (HLS) stream sources for {$type} {$title} (Original Model ID: {$model->id}) after trying all sources.");
+        Log::channel('ffmpeg')->error("No available (HLS) URLs for {$type} '{$title}' (Original Model ID: {$model->id}) after trying all sources.");
+        Redis::srem("hls:active_{$type}_ids", $model->id); // Clean up if no stream started
         return null;
     }
 
-    public function switchStreamSource(string $type, Channel|Episode $model, ChannelStreamSource $newSource, ?int $failedStreamSourceId): bool
+    /**
+     * Switch the active stream URL for a channel or episode to the next available one.
+     *
+     * @param string $type 'channel' or 'episode'
+     * @param Channel|Episode $model The channel or episode model.
+     * @param string $failedUrl The URL that failed.
+     * @return bool True if switch was successful, false otherwise.
+     */
+    public function switchToNextAvailableUrl(string $type, Channel|Episode $model, string $failedUrl): bool
     {
         $title = strip_tags($type === 'channel' ? ($model->title_custom ?? $model->title) : $model->title);
-        Log::channel('ffmpeg')->info("Attempting to switch stream source for {$type} {$title} (ID: {$model->id}) to new source ID: {$newSource->id} (URL: {$newSource->stream_url}). Failed source ID: {$failedStreamSourceId}.");
+        Log::channel('ffmpeg')->info("Attempting to switch stream for {$type} '{$title}' (ID: {$model->id}) from failed URL: {$failedUrl}.");
 
-        if ($failedStreamSourceId) {
-            $failedSource = ChannelStreamSource::find($failedStreamSourceId);
-            if ($failedSource) {
-                $failedSource->update(['status' => 'down', 'last_failed_at' => now()]);
-                Log::channel('ffmpeg')->info("Marked failed stream source ID {$failedStreamSourceId} as 'down'.");
+        if ($this->isRunning($type, $model->id)) {
+            Log::channel('ffmpeg')->info("Stopping existing stream for {$type} '{$title}' (ID: {$model->id}) before switching.");
+            $this->stopStream($type, $model->id);
+        } else {
+            Log::channel('ffmpeg')->info("No existing stream found running for {$type} '{$title}' (ID: {$model->id}). Proceeding to find next available URL.");
+        }
+
+        $urlsToTry = [];
+        $primaryUrl = ($type === 'channel') ? ($model->url_custom ?? $model->url) : $model->url;
+        if ($primaryUrl) {
+            $urlsToTry[] = ['url' => $primaryUrl, 'title_desc' => $title . " (Primary)"];
+        }
+
+        if ($type === 'channel' && method_exists($model, 'failoverChannels')) {
+            $failoverChannels = $model->failoverChannels ?? [];
+            foreach ($failoverChannels as $failoverChannel) {
+                $url = $failoverChannel->url_custom ?? $failoverChannel->url;
+                if ($url) {
+                     $urlsToTry[] = ['url' => $url, 'title_desc' => ($failoverChannel->title_custom ?? $failoverChannel->title) . " (Failover for Channel ID {$model->id})"];
+                }
             }
         }
 
-        if ($this->isRunning($type, $model->id)) {
-            Log::channel('ffmpeg')->info("Stopping existing stream for {$type} {$title} (ID: {$model->id}) before switching.");
-            $this->stopStream($type, $model->id);
-        } else {
-            Log::channel('ffmpeg')->info("No existing stream found running for {$type} {$title} (ID: {$model->id}). Proceeding to start new source.");
+        if (empty($urlsToTry)) {
+            Log::channel('ffmpeg')->error("No URLs (primary or failover) available for {$type} '{$title}' (ID: {$model->id}) to switch to.");
+            return false;
         }
+
+        $failedUrlIndex = -1;
+        foreach ($urlsToTry as $index => $urlData) {
+            if ($urlData['url'] === $failedUrl) {
+                $failedUrlIndex = $index;
+                break;
+            }
+        }
+
+        // Determine the starting index for trying next URLs
+        // If failed URL is not in the list or is the last one, start from the beginning (index 0).
+        // Otherwise, start from the next URL.
+        $startIndex = ($failedUrlIndex === -1 || $failedUrlIndex === count($urlsToTry) - 1) ? 0 : $failedUrlIndex + 1;
 
         $playlist = $model->playlist;
-        $userAgent = $playlist->user_agent ?? null;
-        $customHeaders = $newSource->custom_headers ?? null;
-        $streamSettings = ProxyService::getStreamSettings();
-        $ffprobeTimeout = $streamSettings['ffmpeg_ffprobe_timeout'] ?? 5;
-
-        try {
-            $this->runPreCheck($type, $model->id, $newSource->stream_url, $userAgent, $newSource->provider_name ?? "Source ID {$newSource->id}", $ffprobeTimeout, $customHeaders);
-            $this->startStreamWithSpeedCheck(
-                type: $type,
-                model: $model,
-                streamUrl: $newSource->stream_url,
-                title: $title,
-                playlistId: $playlist->id,
-                userAgent: $userAgent,
-                customHeaders: $customHeaders
-            );
-
-            $newSource->update(['status' => 'active', 'consecutive_failures' => 0, 'last_checked_at' => now()]);
-            Redis::set("hls:active_source:{$type}:{$model->id}", $newSource->id);
-            Cache::put("hls:stream_mapping:{$type}:{$model->id}", $model->id, now()->addHours(24));
-            MonitorActiveStreamJob::dispatch($model->id, $newSource->id, null);
-            Log::channel('ffmpeg')->info("Successfully switched stream for {$type} {$title} (ID: {$model->id}) to new source ID: {$newSource->id}.");
-            return true;
-
-        } catch (SourceNotResponding $e) {
-            Log::channel('ffmpeg')->critical("Failed to start new stream source ID {$newSource->id} for {$type} {$title} (ID: {$model->id}) during switch: PreCheck failed - {$e->getMessage()}");
-            $newSource->increment('consecutive_failures');
-            $newSource->update(['status' => 'problematic', 'last_failed_at' => now(), 'last_checked_at' => now()]);
-            return false;
-        } catch (Exception $e) {
-            Log::channel('ffmpeg')->critical("Failed to start new stream source ID {$newSource->id} for {$type} {$title} (ID: {$model->id}) during switch: {$e->getMessage()}");
-            $newSource->increment('consecutive_failures');
-            $newSource->update(['status' => 'down', 'last_failed_at' => now(), 'last_checked_at' => now()]);
+         if (!$playlist) {
+            Log::channel('ffmpeg')->error("Playlist not found for {$type} '{$title}' (ID: {$model->id}) during switch. Cannot proceed.");
             return false;
         }
+        $userAgent = $playlist->user_agent ?? null;
+        $streamSettings = ProxyService::getStreamSettings();
+        $ffprobeTimeout = $streamSettings['ffmpeg_ffprobe_timeout'] ?? 5;
+        // Custom headers: assume null for this simplified model, or use main model's headers if applicable
+        $customHeaders = null;
+
+
+        for ($i = 0; $i < count($urlsToTry); $i++) {
+            $currentIndex = ($startIndex + $i) % count($urlsToTry);
+            $urlData = $urlsToTry[$currentIndex];
+            $currentUrl = $urlData['url'];
+            $currentStreamLogTitle = $urlData['title_desc'];
+
+            // Avoid immediately retrying the exact same failed URL if other options exist.
+            if ($currentUrl === $failedUrl && $i === 0 && $failedUrlIndex !== -1 && count($urlsToTry) > 1) {
+                // This condition implies we are about to retry the $failedUrl immediately after it failed,
+                // and there are other URLs in the list. Let's skip to the next one in such case.
+                // If $failedUrl was the *only* url, count($urlsToTry) > 1 would be false, and we'd try it.
+                // If we've looped through all others and came back to $failedUrl, $i would not be 0.
+                if (($startIndex + $i + 1) % count($urlsToTry) !== $failedUrlIndex ) { // check if next one is not looping back to failed immediately
+                     continue;
+                }
+            }
+
+
+            Log::channel('ffmpeg')->info("Attempting next URL for {$type} '{$title}': {$currentUrl}");
+            try {
+                $this->runPreCheck($type, $model->id, $currentUrl, $userAgent, $currentStreamLogTitle, $ffprobeTimeout, $customHeaders);
+                $this->startStreamWithSpeedCheck(
+                    type: $type,
+                    model: $model,
+                    streamUrl: $currentUrl,
+                    title: $title, // Original model title
+                    playlistId: $playlist->id,
+                    userAgent: $userAgent,
+                    customHeaders: $customHeaders
+                );
+
+                Redis::set("hls:active_url:{$type}:{$model->id}", $currentUrl);
+                MonitorActiveStreamJob::dispatch($model->id, $currentUrl, $type, null);
+                Log::channel('ffmpeg')->info("Successfully switched stream for {$type} '{$title}' (ID: {$model->id}) to new URL: {$currentUrl}.");
+                return true;
+
+            } catch (SourceNotResponding $e) {
+                Log::channel('ffmpeg')->warning("Failed to start new URL {$currentUrl} for {$type} '{$title}' (ID: {$model->id}) during switch: PreCheck failed - {$e->getMessage()}");
+                 $badSourceCacheKey = ProxyService::BAD_SOURCE_CACHE_PREFIX . md5($currentUrl) . ':' . $playlist->id;
+                 Redis::setex($badSourceCacheKey, ProxyService::BAD_SOURCE_CACHE_SECONDS, $e->getMessage());
+                // Continue to the next URL in the list
+            } catch (Exception $e) {
+                Log::channel('ffmpeg')->warning("Failed to start new URL {$currentUrl} for {$type} '{$title}' (ID: {$model->id}) during switch: {$e->getMessage()}");
+                 $badSourceCacheKey = ProxyService::BAD_SOURCE_CACHE_PREFIX . md5($currentUrl) . ':' . $playlist->id;
+                 Redis::setex($badSourceCacheKey, ProxyService::BAD_SOURCE_CACHE_SECONDS, $e->getMessage());
+                // Continue to the next URL in the list
+            }
+        }
+
+        Log::channel('ffmpeg')->critical("All available URLs failed for {$type} '{$title}' (ID: {$model->id}) after trying to switch from {$failedUrl}.");
+        // Potentially dispatch StreamUnavailableEvent here if desired
+        return false;
     }
 
     private function startStreamWithSpeedCheck(
@@ -284,7 +377,7 @@ class HlsStreamService
         Redis::srem("hls:active_{$type}_ids", $id);
         Redis::del("hls:streaminfo:starttime:{$type}:{$id}");
         Redis::del("hls:streaminfo:details:{$type}:{$id}");
-        Redis::del("hls:active_source:{$type}:{$id}");
+        Redis::del("hls:active_url:{$type}:{$id}"); // Changed from active_source to active_url
         $storageDir = Storage::disk('app')->path(($type === 'episode' ? "hls/e/" : "hls/") . $id);
         File::deleteDirectory($storageDir);
         if ($model && $model->playlist) $this->decrementActiveStreams($model->playlist->id);
@@ -463,25 +556,32 @@ class HlsStreamService
         return $cmd;
     }
 
-    public function performHealthCheck(ChannelStreamSource $streamSource): array
+    public function performHealthCheck(string $url, ?array $customHeaders = null, ?string $userAgent = null): array
     {
-        Log::channel('health_check')->info("Performing health check for stream source ID: {$streamSource->id} (URL: {$streamSource->stream_url})");
+        Log::channel('health_check')->info("Performing health check for URL: {$url}");
 
         $timeoutSeconds = config('failover.health_check_timeout', 10);
         $maxRetries = config('failover.health_check_retries', 1);
 
-        $requestOptions = ['timeout' => $timeoutSeconds];
-        if (!empty($streamSource->custom_headers)) {
-            $requestOptions['headers'] = $streamSource->custom_headers;
+        $request = Http::retry($maxRetries, 100)->timeout($timeoutSeconds);
+
+        if (!empty($customHeaders)) {
+            // If User-Agent is part of customHeaders, it will be used.
+            // Otherwise, if $userAgent is provided separately, it will be set.
+            $finalHeaders = $customHeaders;
+            if ($userAgent && !isset($finalHeaders['User-Agent']) && !isset($finalHeaders['user-agent'])) {
+                 $finalHeaders['User-Agent'] = $userAgent;
+            }
+            $request->withHeaders($finalHeaders);
+        } elseif ($userAgent) {
+            $request->withUserAgent($userAgent);
         }
 
         try {
-            $response = Http::retry($maxRetries, 100)
-                            ->withOptions($requestOptions)
-                            ->get($streamSource->stream_url);
+            $response = $request->get($url);
 
             if (!$response->successful()) {
-                Log::channel('health_check')->warning("Health check HTTP error for source ID {$streamSource->id}: Status {$response->status()}");
+                Log::channel('health_check')->warning("Health check HTTP error for URL {$url}: Status {$response->status()}");
                 return [
                     'status' => 'http_error',
                     'http_status' => $response->status(),
@@ -491,7 +591,7 @@ class HlsStreamService
 
             $manifestContent = $response->body();
             if (empty($manifestContent)) {
-                Log::channel('health_check')->warning("Health check manifest empty for source ID {$streamSource->id}.");
+                Log::channel('health_check')->warning("Health check manifest empty for URL {$url}.");
                 return ['status' => 'http_error', 'http_status' => $response->status(), 'message' => 'Manifest content is empty.'];
             }
 
@@ -503,11 +603,11 @@ class HlsStreamService
             $segmentCount = preg_match_all('/\.ts(\?|$)/m', $manifestContent);
 
             if ($mediaSequence === null && $segmentCount === 0 && !str_contains(strtolower($manifestContent), '#extm3u')) {
-                 Log::channel('health_check')->warning("Health check failed for source ID {$streamSource->id}: Manifest content doesn't look like HLS.");
+                 Log::channel('health_check')->warning("Health check failed for URL {$url}: Manifest content doesn't look like HLS.");
                  return ['status' => 'manifest_error', 'http_status' => $response->status(), 'message' => 'Manifest content does not appear to be a valid HLS playlist.'];
             }
 
-            Log::channel('health_check')->info("Health check successful for source ID {$streamSource->id}. Media Sequence: {$mediaSequence}, Segments: {$segmentCount}");
+            Log::channel('health_check')->info("Health check successful for URL {$url}. Media Sequence: {$mediaSequence}, Segments: {$segmentCount}");
             return [
                 'status' => 'ok',
                 'http_status' => $response->status(),
@@ -517,10 +617,10 @@ class HlsStreamService
             ];
 
         } catch (\Illuminate\Http\Client\ConnectionException $e) {
-            Log::channel('health_check')->error("Health check connection error for source ID {$streamSource->id}: " . $e->getMessage());
+            Log::channel('health_check')->error("Health check connection error for URL {$url}: " . $e->getMessage());
             return ['status' => 'connection_error', 'message' => 'ConnectionException: ' . $e->getMessage()];
         } catch (Exception $e) {
-            Log::channel('health_check')->error("Health check general error for source ID {$streamSource->id}: " . $e->getMessage());
+            Log::channel('health_check')->error("Health check general error for URL {$url}: " . $e->getMessage());
             return ['status' => 'connection_error', 'message' => 'General Exception: ' . $e->getMessage()];
         }
     }

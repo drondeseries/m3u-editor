@@ -8,6 +8,13 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
+use App\Models\Channel;
+use App\Models\Episode;
+use App\Services\HlsStreamService;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Redis;
+use Illuminate\Support\Facades\Config; // Added for config access
+use Throwable; // Added for broad exception catching
 // Consider if ShouldBeUnique is needed:
 // use Illuminate\Contracts\Queue\ShouldBeUnique;
 
@@ -16,56 +23,24 @@ class MonitorActiveStreamJob implements ShouldQueue //, ShouldBeUnique
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public int $channelId;
-    public int $streamSourceId;
-    public ?int $originalRequesterId;
+    public string $monitoringUrl;
+    public string $streamType; // e.g., 'channel', 'episode'
+    public ?int $userId;
 
     /**
      * Create a new job instance.
      *
      * @param int $channelId
-     * @param int $streamSourceId
-     * @param int|null $originalRequesterId
+     * @param string $monitoringUrl
+     * @param string $streamType
+     * @param int|null $userId
      */
-    public function __construct(int $channelId, int $streamSourceId, ?int $originalRequesterId = null)
+    public function __construct(int $channelId, string $monitoringUrl, string $streamType, ?int $userId = null)
     {
         $this->channelId = $channelId;
-        $this->streamSourceId = $streamSourceId;
-        $this->originalRequesterId = $originalRequesterId;
-    }
-
-    /**
-     * Execute the job.
-     */
-use App\Models\Channel;
-use App\Models\ChannelStreamSource;
-use App\Services\HlsStreamService;
-use Illuminate\Support\Facades\Redis;
-use Illuminate\Support\Facades\Cache; // Added for manifest state
-use Throwable; // Added for broad exception catching
-
-class MonitorActiveStreamJob implements ShouldQueue //, ShouldBeUnique
-{
-    use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
-
-    public int $channelId;
-    public int $streamSourceId;
-    public ?int $originalRequesterId;
-    // Optional: Add properties for retry counts, if not using Laravel's built-in retry logic extensively
-    // public int $currentRetryCount = 0;
-
-
-    /**
-     * Create a new job instance.
-     *
-     * @param int $channelId
-     * @param int $streamSourceId
-     * @param int|null $originalRequesterId
-     */
-    public function __construct(int $channelId, int $streamSourceId, ?int $originalRequesterId = null)
-    {
-        $this->channelId = $channelId;
-        $this->streamSourceId = $streamSourceId;
-        $this->originalRequesterId = $originalRequesterId;
+        $this->monitoringUrl = $monitoringUrl;
+        $this->streamType = $streamType;
+        $this->userId = $userId;
     }
 
     /**
@@ -73,146 +48,108 @@ class MonitorActiveStreamJob implements ShouldQueue //, ShouldBeUnique
      */
     public function handle(HlsStreamService $hlsStreamService): void
     {
-        Log::channel('monitor_stream')->info("MonitorActiveStreamJob started for Channel ID: {$this->channelId}, Stream Source ID: {$this->streamSourceId}");
+        Log::channel('monitor_stream')->info("MonitorActiveStreamJob started for {$this->streamType} ID: {$this->channelId}, Monitoring URL: {$this->monitoringUrl}");
 
         try {
-            $channel = Channel::find($this->channelId);
-            if (!$channel) {
-                Log::channel('monitor_stream')->warning("MonitorActiveStreamJob: Channel ID {$this->channelId} not found. Terminating job.");
+            $model = null;
+            if ($this->streamType === 'channel') {
+                $model = Channel::with('playlist')->find($this->channelId);
+            } elseif ($this->streamType === 'episode') {
+                $model = Episode::with('playlist')->find($this->channelId);
+            }
+
+            if (!$model || !$model->playlist) {
+                Log::channel('monitor_stream')->warning("MonitorActiveStreamJob: Model or playlist not found for {$this->streamType} ID {$this->channelId}. Terminating job.");
                 return;
             }
 
-            $streamSource = ChannelStreamSource::find($this->streamSourceId);
-            if (!$streamSource) {
-                Log::channel('monitor_stream')->warning("MonitorActiveStreamJob: Stream Source ID {$this->streamSourceId} for Channel ID {$this->channelId} not found. Terminating job.");
+            $playlistUserAgent = $model->playlist->user_agent ?? null;
+
+            $activeUrlRedisKey = "hls:active_url:{$this->streamType}:{$this->channelId}";
+            $currentActiveUrl = Redis::get($activeUrlRedisKey);
+
+            if ($currentActiveUrl !== $this->monitoringUrl) {
+                Log::channel('monitor_stream')->info("MonitorActiveStreamJob: Monitoring URL {$this->monitoringUrl} is no longer the active URL for {$this->streamType} ID {$this->channelId} (Active is {$currentActiveUrl}). Terminating job.");
+                Redis::del("hls:manifest_state:" . md5($this->monitoringUrl)); // Clean up old manifest state
+                Redis::del("hls:url_failures:" . md5($this->monitoringUrl));
+                Redis::del("hls:url_stalls:" . md5($this->monitoringUrl));
                 return;
             }
 
-            // Ensure this stream source is still the active one.
-            // Assuming 'channel' type for now, adjust if episodes are monitored similarly.
-            $activeSourceIdRedisKey = "hls:active_source:channel:{$this->channelId}";
-            $currentActiveSourceId = Redis::get($activeSourceIdRedisKey);
-
-            if ((int)$currentActiveSourceId !== $this->streamSourceId) {
-                Log::channel('monitor_stream')->info("MonitorActiveStreamJob: Stream Source ID {$this->streamSourceId} is no longer the active source for Channel ID {$this->channelId} (Active is {$currentActiveSourceId}). Terminating job.");
-                // Potentially clean up old manifest state if any for this non-active source
-                Redis::del("hls:manifest_state:{$this->streamSourceId}");
-                return;
-            }
-
-            $healthCheckResult = $hlsStreamService->performHealthCheck($streamSource);
+            // For URL monitoring, custom headers for performHealthCheck would typically be null unless they are globally defined for the channel/episode
+            $healthCheckResult = $hlsStreamService->performHealthCheck($this->monitoringUrl, null, $playlistUserAgent);
             $status = $healthCheckResult['status'] ?? 'unknown_error';
 
+            $failureCountKey = "hls:url_failures:" . md5($this->monitoringUrl);
+            $stallCountKey = "hls:url_stalls:" . md5($this->monitoringUrl);
+            $manifestStateKey = "hls:manifest_state:" . md5($this->monitoringUrl);
+
             if ($status === 'http_error' || $status === 'connection_error' || $status === 'manifest_error') {
-                $streamSource->increment('consecutive_failures');
-                $streamSource->last_failed_at = now();
-                $maxFailures = config('failover.max_consecutive_failures', 3);
-                $retryDelay = config('failover.monitoring_retry_delay', 5); // seconds
+                $currentFailures = Redis::incr($failureCountKey);
+                Redis::expire($failureCountKey, Config::get('failover.redis_counter_ttl', 3600)); // TTL for counter
 
-                Log::channel('monitor_stream')->warning("MonitorActiveStreamJob: Health check failed for Source ID {$this->streamSourceId} (Channel {$this->channelId}). Status: {$status}, Failures: {$streamSource->consecutive_failures}. Message: {$healthCheckResult['message'] ?? 'N/A'}");
+                $maxFailures = Config::get('failover.max_consecutive_url_failures', 3);
+                $retryDelay = Config::get('failover.monitoring_retry_delay', 5);
 
-                if ($streamSource->consecutive_failures >= $maxFailures) {
-                    $streamSource->status = 'down';
-                    Log::channel('monitor_stream')->error("MonitorActiveStreamJob: Source ID {$this->streamSourceId} (Channel {$this->channelId}) reached max failures ({$streamSource->consecutive_failures}). Setting status to 'down' and dispatching HandleStreamFailoverJob.");
-                    HandleStreamFailoverJob::dispatch($this->channelId, $this->streamSourceId);
+                Log::channel('monitor_stream')->warning("MonitorActiveStreamJob: Health check failed for URL {$this->monitoringUrl} ({$this->streamType} ID {$this->channelId}). Status: {$status}, Failures: {$currentFailures}. Message: {$healthCheckResult['message'] ?? 'N/A'}");
+
+                if ($currentFailures >= $maxFailures) {
+                    Log::channel('monitor_stream')->error("MonitorActiveStreamJob: URL {$this->monitoringUrl} ({$this->streamType} ID {$this->channelId}) reached max failures ({$currentFailures}). Dispatching HandleStreamFailoverJob.");
+                    HandleStreamFailoverJob::dispatch($this->channelId, $this->monitoringUrl, $this->streamType, $this->userId);
+                    Redis::sadd("hls:problematic_urls", json_encode(['channel_id' => $this->channelId, 'type' => $this->streamType, 'url' => $this->monitoringUrl, 'user_agent' => $playlistUserAgent, 'failed_at' => now()->timestamp]));
+                    Redis::del($failureCountKey, $stallCountKey, $manifestStateKey);
                 } else {
-                    $streamSource->status = 'problematic'; // Mark as problematic on any failure
-                    Log::channel('monitor_stream')->info("MonitorActiveStreamJob: Source ID {$this->streamSourceId} (Channel {$this->channelId}) is problematic. Rescheduling check in {$retryDelay}s.");
-                    self::dispatch($this->channelId, $this->streamSourceId, $this->originalRequesterId)->delay(now()->addSeconds($retryDelay));
+                    Log::channel('monitor_stream')->info("MonitorActiveStreamJob: URL {$this->monitoringUrl} ({$this->streamType} ID {$this->channelId}) is problematic. Rescheduling check in {$retryDelay}s.");
+                    self::dispatch($this->channelId, $this->monitoringUrl, $this->streamType, $this->userId)->delay(now()->addSeconds($retryDelay));
                 }
-                $streamSource->save();
                 return;
             }
 
             if ($status === 'ok') {
-                $manifestStateKey = "hls:manifest_state:{$this->streamSourceId}";
                 $previousManifestStateJson = Redis::get($manifestStateKey);
                 $previousManifestState = $previousManifestStateJson ? json_decode($previousManifestStateJson, true) : null;
-
                 $currentMediaSequence = $healthCheckResult['media_sequence'] ?? null;
-                $monitoringInterval = config('failover.monitoring_interval', 7); // seconds
-                $stallThreshold = config('failover.stall_threshold_checks', 3); // Number of consecutive same sequence checks to trigger failover
+                $monitoringInterval = Config::get('failover.monitoring_interval', 7);
+                $maxStallCounts = Config::get('failover.max_stall_counts', 3);
 
                 if ($previousManifestState && isset($previousManifestState['media_sequence']) && $currentMediaSequence !== null && (int)$previousManifestState['media_sequence'] === (int)$currentMediaSequence) {
-                    // Media sequence hasn't changed. This could indicate a stall.
-                    $stallChecks = ($previousManifestState['stall_checks'] ?? 0) + 1;
-                    Log::channel('monitor_stream')->warning("MonitorActiveStreamJob: Media sequence {$currentMediaSequence} for Source ID {$this->streamSourceId} (Channel {$this->channelId}) has not changed. Stall checks: {$stallChecks}.");
+                    $currentStalls = Redis::incr($stallCountKey);
+                    Redis::expire($stallCountKey, Config::get('failover.redis_counter_ttl', 3600));
+                    Log::channel('monitor_stream')->warning("MonitorActiveStreamJob: Media sequence {$currentMediaSequence} for URL {$this->monitoringUrl} ({$this->streamType} ID {$this->channelId}) has not changed. Stall counts: {$currentStalls}.");
 
-                    if ($stallChecks >= $stallThreshold) {
-                        $streamSource->increment('consecutive_failures'); // Use same counter or a dedicated one for stalls
-                        $streamSource->last_failed_at = now();
-                        $streamSource->status = 'problematic'; // Or 'stalled' if you add that status
-                        $streamSource->save();
-                        Log::channel('monitor_stream')->error("MonitorActiveStreamJob: Source ID {$this->streamSourceId} (Channel {$this->channelId}) detected as stalled after {$stallChecks} checks. Dispatching HandleStreamFailoverJob.");
-                        HandleStreamFailoverJob::dispatch($this->channelId, $this->streamSourceId);
-                        Redis::del($manifestStateKey); // Clear stall tracking on failover
-                        return;
-                    } else {
-                        // Not yet at stall threshold, update stall checks and reschedule
-                        Redis::setex($manifestStateKey, $monitoringInterval * ($stallThreshold + 2), json_encode(['media_sequence' => $currentMediaSequence, 'stall_checks' => $stallChecks, 'last_checked_at' => now()->toIso8601String()]));
-                        $streamSource->status = 'active'; // Still active, but being watched for stall
-                        $streamSource->last_checked_at = now();
-                        $streamSource->save();
-                        self::dispatch($this->channelId, $this->streamSourceId, $this->originalRequesterId)->delay(now()->addSeconds($monitoringInterval));
+                    if ($currentStalls >= $maxStallCounts) {
+                        Log::channel('monitor_stream')->error("MonitorActiveStreamJob: URL {$this->monitoringUrl} ({$this->streamType} ID {$this->channelId}) detected as stalled after {$currentStalls} checks. Dispatching HandleStreamFailoverJob.");
+                        HandleStreamFailoverJob::dispatch($this->channelId, $this->monitoringUrl, $this->streamType, $this->userId);
+                        Redis::sadd("hls:problematic_urls", json_encode(['channel_id' => $this->channelId, 'type' => $this->streamType, 'url' => $this->monitoringUrl, 'user_agent' => $playlistUserAgent, 'failed_at' => now()->timestamp, 'reason' => 'stalled']));
+                        Redis::del($failureCountKey, $stallCountKey, $manifestStateKey);
                         return;
                     }
+                     // Update manifest state with new stall count and last checked time
+                    Redis::setex($manifestStateKey, $monitoringInterval * ($maxStallCounts + 2), json_encode(['media_sequence' => $currentMediaSequence, 'last_checked_at' => now()->toIso8601String()]));
                 } else {
-                    // Media sequence changed or it's the first check, or currentMediaSequence is null (treat as healthy for now if segments exist)
-                    if ($currentMediaSequence === null && ($healthCheckResult['segment_count'] ?? 0) === 0) {
-                        // If no sequence and no segments, this is likely an issue.
-                        Log::channel('monitor_stream')->warning("MonitorActiveStreamJob: Source ID {$this->streamSourceId} (Channel {$this->channelId}) has no media sequence and no segments. Treating as problematic.");
-                        // This logic is similar to the http_error/connection_error block
-                        $streamSource->increment('consecutive_failures');
-                        $streamSource->last_failed_at = now();
-                        $maxFailures = config('failover.max_consecutive_failures', 3);
-                        $retryDelay = config('failover.monitoring_retry_delay', 5);
-                        if ($streamSource->consecutive_failures >= $maxFailures) {
-                            $streamSource->status = 'down';
-                            HandleStreamFailoverJob::dispatch($this->channelId, $this->streamSourceId);
-                        } else {
-                            $streamSource->status = 'problematic';
-                            self::dispatch($this->channelId, $this->streamSourceId, $this->originalRequesterId)->delay(now()->addSeconds($retryDelay));
-                        }
-                        $streamSource->save();
-                        return;
-                    }
-
-                    // Healthy state or first check
-                    Log::channel('monitor_stream')->info("MonitorActiveStreamJob: Health check OK for Source ID {$this->streamSourceId} (Channel {$this->channelId}). Media Sequence: {$currentMediaSequence}.");
-                    $streamSource->consecutive_failures = 0;
-                    $streamSource->status = 'active';
-                    $streamSource->last_checked_at = now();
-                    $streamSource->save();
-                    Redis::setex($manifestStateKey, $monitoringInterval * ($stallThreshold + 2), json_encode(['media_sequence' => $currentMediaSequence, 'stall_checks' => 0, 'last_checked_at' => now()->toIso8601String()]));
-                    self::dispatch($this->channelId, $this->streamSourceId, $this->originalRequesterId)->delay(now()->addSeconds($monitoringInterval));
-                    return;
+                    // Healthy or first check, or sequence changed
+                    Redis::del($failureCountKey, $stallCountKey); // Clear failure and stall counts on healthy check
+                    // Store new manifest state
+                    Redis::setex($manifestStateKey, $monitoringInterval * ($maxStallCounts + 2), json_encode(['media_sequence' => $currentMediaSequence, 'last_checked_at' => now()->toIso8601String()]));
+                    Log::channel('monitor_stream')->info("MonitorActiveStreamJob: Health check OK for URL {$this->monitoringUrl} ({$this->streamType} ID {$this->channelId}). Media Sequence: {$currentMediaSequence}. Resetting failure/stall counts.");
                 }
+                // Reschedule for next interval
+                self::dispatch($this->channelId, $this->monitoringUrl, $this->streamType, $this->userId)->delay(now()->addSeconds($monitoringInterval));
+                return;
             } else {
-                 Log::channel('monitor_stream')->error("MonitorActiveStreamJob: Unhandled health check status '{$status}' for Source ID {$this->streamSourceId} (Channel {$this->channelId}). Health check result: " . json_encode($healthCheckResult));
-                 // Potentially treat as a failure and reschedule or failover
-                 $streamSource->increment('consecutive_failures');
-                 $streamSource->last_failed_at = now();
-                 $streamSource->status = 'problematic';
-                 $streamSource->save();
-                 $retryDelay = config('failover.monitoring_retry_delay', 15); // Longer delay for unknown issues
-                 self::dispatch($this->channelId, $this->streamSourceId, $this->originalRequesterId)->delay(now()->addSeconds($retryDelay));
+                 Log::channel('monitor_stream')->error("MonitorActiveStreamJob: Unhandled health check status '{$status}' for URL {$this->monitoringUrl}. Result: " . json_encode($healthCheckResult));
+                 $retryDelay = Config::get('failover.monitoring_retry_delay', 15);
+                 self::dispatch($this->channelId, $this->monitoringUrl, $this->streamType, $this->userId)->delay(now()->addSeconds($retryDelay));
             }
 
         } catch (Throwable $e) {
-            Log::channel('monitor_stream')->error("MonitorActiveStreamJob: Exception for Channel ID {$this->channelId}, Stream Source ID {$this->streamSourceId}: {$e->getMessage()}");
-            // Attempt to release the job back to the queue with a delay for transient issues
-            // Customize retry logic as needed, possibly with backoff
-            if ($this->attempts() < config('failover.monitor_job_max_attempts', 3)) {
-                $this->release(config('failover.monitor_job_retry_delay', 60));
+            Log::channel('monitor_stream')->error("MonitorActiveStreamJob: Exception for {$this->streamType} ID {$this->channelId}, URL {$this->monitoringUrl}: {$e->getMessage()}");
+            if ($this->attempts() < Config::get('failover.monitor_job_max_attempts', 3)) {
+                $this->release(Config::get('failover.monitor_job_retry_delay', 60));
             } else {
-                // Max attempts reached, log critical error. Consider marking source as problematic.
-                Log::channel('monitor_stream')->critical("MonitorActiveStreamJob: Max attempts reached for Channel ID {$this->channelId}, Stream Source ID {$this->streamSourceId}. Error: {$e->getMessage()}");
-                $streamSource = ChannelStreamSource::find($this->streamSourceId);
-                if ($streamSource) {
-                    $streamSource->status = 'problematic'; // Or 'unknown_error'
-                    $streamSource->notes = ($streamSource->notes ?? '') . "\nMax job attempts reached: " . $e->getMessage();
-                    $streamSource->save();
-                }
+                Log::channel('monitor_stream')->critical("MonitorActiveStreamJob: Max attempts reached for {$this->streamType} ID {$this->channelId}, URL {$this->monitoringUrl}. Error: {$e->getMessage()}");
+                // Potentially add to problematic URLs here too if it repeatedly fails with exceptions
+                // Redis::sadd("hls:problematic_urls", json_encode(['channel_id' => $this->channelId, 'type' => $this->streamType, 'url' => $this->monitoringUrl, 'user_agent' => $playlistUserAgent ?? null, 'failed_at' => now()->timestamp, 'reason' => 'job_exception']));
             }
         }
     }
@@ -225,7 +162,7 @@ class MonitorActiveStreamJob implements ShouldQueue //, ShouldBeUnique
     // public function uniqueId(): string
     // {
     //     // Generate a unique ID to prevent duplicate jobs if using ShouldBeUnique
-    //     return 'monitor_stream_' . $this->channelId . '_' . $this->streamSourceId;
+    //     return 'monitor_stream_' . $this->channelId . '_' . md5($this->monitoringUrl) . '_' . $this->streamType;
     // }
 
     /**
