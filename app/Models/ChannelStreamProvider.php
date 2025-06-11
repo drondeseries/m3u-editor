@@ -6,30 +6,29 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
-class ChannelStream extends Model
+class ChannelStreamProvider extends Model
 {
     use HasFactory;
 
+    protected $table = 'channel_stream_providers';
+
     protected $fillable = [
         'channel_id',
-        'provider_name',
         'stream_url',
         'priority',
-        'status',
+        'provider_name',
+        'is_active',
         'last_checked_at',
-        'last_error_at',
-        'consecutive_stall_count',
-        'consecutive_failure_count',
+        'status',
     ];
 
     protected $casts = [
+        'channel_id' => 'integer',
+        'priority' => 'integer',
+        'is_active' => 'boolean',
         'last_checked_at' => 'datetime',
-        'last_error_at' => 'datetime',
     ];
 
-    /**
-     * Get the channel that owns the stream.
-     */
     public function channel(): BelongsTo
     {
         return $this->belongsTo(Channel::class);

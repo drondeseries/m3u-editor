@@ -2,235 +2,161 @@
 
 namespace App\Jobs;
 
-use App\Models\UserStreamSession;
-use App\Models\ChannelStream;
 use App\Models\Channel;
+use App\Models\ChannelStreamProvider;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\File;
-use Symfony\Component\Process\Process; // Keep this for Process::run
-use App\Events\StreamSwitchEvent; // Placeholder
-use App\Events\StreamUnavailableEvent; // Placeholder
-use Illuminate\Contracts\Queue\ShouldBeUnique; // For ensuring only one job per session
-use Illuminate\Support\Str; // For Str::contains in isFfmpegProcessHealthy
+use Throwable;
 
-
-class MonitorStreamHealthJob implements ShouldQueue, ShouldBeUnique
+class MonitorStreamHealthJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public $userStreamSessionId;
-    public $tries = 1; // Don't retry this job via Laravel's retry mechanism if it fails; it handles its own rescheduling or failover.
-    public $timeout = 60; // Job timeout
-
-    const MONITORING_INTERVAL_SECONDS = 10; // How often to run this check
-    const MAX_CONSECUTIVE_STALLS_FOR_STREAM = 2; // Number of stall detections before marking ChannelStream problematic
-    const MAX_CONSECUTIVE_FAILURES_FOR_STREAM = 3; // Number of general failures before marking ChannelStream problematic
+    public int $tries = 3; // Allow up to 3 attempts for the job
+    public int $timeout = 120; // Job can run for 120 seconds
 
     /**
      * Create a new job instance.
-     *
-     * @param int $userStreamSessionId
      */
-    public function __construct(int $userStreamSessionId)
-    {
-        $this->userStreamSessionId = $userStreamSessionId;
-    }
-
-    /**
-     * The unique ID of the job.
-     *
-     * @return string
-     */
-    public function uniqueId(): string
-    {
-        return (string)$this->userStreamSessionId;
+    public function __construct(
+        public int $channel_id,
+        public int $stream_provider_id
+    ) {
     }
 
     /**
      * Execute the job.
-     *
-     * @return void
      */
-    public function handle()
+    public function handle(): void
     {
-        Log::debug("MonitorStreamHealthJob: Starting for UserStreamSession ID {$this->userStreamSessionId}.");
+        Log::info("MonitorStreamHealthJob started for channel_id: {$this->channel_id}, stream_provider_id: {$this->stream_provider_id}");
 
-        $userStreamSession = UserStreamSession::with('channel', 'activeChannelStream')->find($this->userStreamSessionId);
+        $streamProvider = ChannelStreamProvider::find($this->stream_provider_id);
 
-        if (!$userStreamSession || !$userStreamSession->activeChannelStream || !$userStreamSession->channel) {
-            Log::warning("MonitorStreamHealthJob: UserStreamSession ID {$this->userStreamSessionId} or its relations not found. Terminating monitoring.");
+        if (!$streamProvider) {
+            Log::error("MonitorStreamHealthJob: ChannelStreamProvider with id {$this->stream_provider_id} not found.");
             return;
         }
 
-        $channelStream = $userStreamSession->activeChannelStream;
-        $channel = $userStreamSession->channel;
-        $sessionId = $userStreamSession->session_id;
-
-        // 1. Check FFmpeg Process Health
-        if (!$userStreamSession->ffmpeg_pid || !$this->isFfmpegProcessHealthy($userStreamSession->ffmpeg_pid)) {
-            Log::warning("MonitorStreamHealthJob: FFmpeg process (PID: {$userStreamSession->ffmpeg_pid}) for session {$sessionId}, stream {$channelStream->id} is not running.");
-            $this->initiateFailover($userStreamSession, $channelStream, $channel, "FFmpeg process died.");
+        if ($streamProvider->channel_id !== $this->channel_id) {
+            Log::error("MonitorStreamHealthJob: Stream provider {$this->stream_provider_id} does not belong to channel {$this->channel_id}.");
             return;
         }
 
-        // 2. Check Manifest Liveness & Segment Advancement
-        $hlsStoragePath = storage_path("app/hls/{$sessionId}_{$channelStream->id}");
-        $m3u8FilePath = "{$hlsStoragePath}/master.m3u8";
-
-        if (!File::exists($m3u8FilePath)) {
-            Log::warning("MonitorStreamHealthJob: M3U8 file {$m3u8FilePath} not found for session {$sessionId}, stream {$channelStream->id}.");
-            // This could be a startup issue or FFmpeg died just now.
-            // Increment failure count for the stream, then try to failover.
-            $channelStream->increment('consecutive_failure_count');
-             if ($channelStream->consecutive_failure_count >= self::MAX_CONSECUTIVE_FAILURES_FOR_STREAM) {
-                 $this->markStreamProblematic($channelStream, "M3U8 file missing repeatedly.");
-             } else { // Save if not yet problematic, just to record failure count
-                $channelStream->save();
-             }
-            $this->initiateFailover($userStreamSession, $channelStream, $channel, "M3U8 file missing.");
+        $channel = Channel::find($this->channel_id);
+        if (!$channel) {
+            Log::error("MonitorStreamHealthJob: Channel with id {$this->channel_id} not found for stream provider {$this->stream_provider_id}.");
+            $streamProvider->last_checked_at = now();
+            $streamProvider->status = 'offline'; // Mark as offline if channel is missing
+            $streamProvider->save();
             return;
         }
 
-        $manifestContent = File::get($m3u8FilePath);
-        $currentMediaSequence = $this->parseMediaSequence($manifestContent);
-        // $latestSegmentTimestamp = File::lastModified($m3u8FilePath); // Use M3U8 modification time as proxy for new segment
+        $streamProvider->last_checked_at = now();
+        $newStatus = 'offline'; // Default to offline
 
-        if ($currentMediaSequence === null) {
-            Log::warning("MonitorStreamHealthJob: Could not parse media sequence from {$m3u8FilePath}.");
-            // Treat as a stall/failure
-            $channelStream->increment('consecutive_stall_count');
-            $channelStream->increment('consecutive_failure_count'); // Also count as a general failure
-            $channelStream->last_error_at = now();
-            $channelStream->save();
-        } elseif ($userStreamSession->last_segment_media_sequence !== null && $currentMediaSequence == $userStreamSession->last_segment_media_sequence) {
-            // Media sequence has not advanced
-            // Check if last_segment_at is set and if enough time has passed to consider it a stall
-            if ($userStreamSession->last_segment_at && (time() - $userStreamSession->last_segment_at->timestamp) >= (self::MONITORING_INTERVAL_SECONDS * (self::MAX_CONSECUTIVE_STALLS_FOR_STREAM -1) ) ) {
-                 Log::warning("MonitorStreamHealthJob: Stream stall detected for session {$sessionId}, stream {$channelStream->id}. Media sequence {$currentMediaSequence} unchanged.");
-                 $channelStream->increment('consecutive_stall_count');
-                 $channelStream->last_error_at = now(); // Update last error time on stall detection
-                 $channelStream->save();
-            }
-        } else {
-            // Stream is advancing or it's the first check for media sequence
-            $userStreamSession->last_segment_media_sequence = $currentMediaSequence;
-            $userStreamSession->last_segment_at = now();
-            $userStreamSession->save();
+        try {
+            // Step 1: HTTP HEAD request to the M3U8 URL
+            $response = Http::timeout(5)->head($streamProvider->stream_url);
 
-            if ($channelStream->consecutive_stall_count > 0) {
-                $channelStream->consecutive_stall_count = 0;
-                // Do not reset last_error_at here, only on full recovery
-                $channelStream->save();
-                 Log::info("MonitorStreamHealthJob: Stream stall count reset (sequence advanced) for session {$sessionId}, stream {$channelStream->id}.");
-            }
-        }
+            if ($response->successful()) {
+                $newStatus = 'online';
 
-        // Reset general failure count for the stream if checks are passing now (M3U8 exists, sequence parsable)
-        if ($channelStream->consecutive_failure_count > 0 && $currentMediaSequence !== null && File::exists($m3u8FilePath)) {
-            Log::info("MonitorStreamHealthJob: Stream {$channelStream->id} seems to have recovered from general failures (M3U8 present, sequence parsable). Resetting failure count.");
-            $channelStream->consecutive_failure_count = 0;
-            // $channelStream->last_error_at = null; // Consider if this should be cleared
-            $channelStream->save();
-        }
-
-
-        // 3. Failover Condition Check
-        if ($channelStream->consecutive_stall_count >= self::MAX_CONSECUTIVE_STALLS_FOR_STREAM ||
-            $channelStream->consecutive_failure_count >= self::MAX_CONSECUTIVE_FAILURES_FOR_STREAM) {
-            Log::error("MonitorStreamHealthJob: Stream {$channelStream->id} for session {$sessionId} exceeded max stalls/failures. Stalls: {$channelStream->consecutive_stall_count}, Failures: {$channelStream->consecutive_failure_count}. Initiating failover.");
-            $this->killFfmpegProcess($userStreamSession->ffmpeg_pid);
-            $this->markStreamProblematic($channelStream, "Exceeded max stalls or failures during monitoring.");
-            $this->initiateFailover($userStreamSession, $channelStream, $channel, "Stream unhealthy (stalled/failed).");
-            return;
-        }
-
-        // 4. If Healthy, Reschedule Monitoring
-        Log::debug("MonitorStreamHealthJob: Health check OK for session {$sessionId}, stream {$channelStream->id}. Rescheduling.");
-        MonitorStreamHealthJob::dispatch($this->userStreamSessionId)->onQueue('monitoring')->delay(now()->addSeconds(self::MONITORING_INTERVAL_SECONDS));
-    }
-
-    private function isFfmpegProcessHealthy($pid): bool
-    {
-        if (!$pid) return false;
-        if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
-            $result = shell_exec("tasklist /FI \"PID eq $pid\" /NH");
-            return Str::contains($result, (string)$pid);
-        } else {
-            try {
-                $result = \Illuminate\Support\Facades\Process::run("ps -p {$pid}");
-                return $result->successful();
-            } catch (\Exception $e) {
-                Log::error("isFfmpegProcessHealthy: Error checking PID {$pid}: " . $e->getMessage());
-                return false;
-            }
-        }
-    }
-
-    private function parseMediaSequence($manifestContent): ?int
-    {
-        if (preg_match('/#EXT-X-MEDIA-SEQUENCE:(\d+)/', $manifestContent, $matches)) {
-            return (int)$matches[1];
-        }
-        return null;
-    }
-
-    private function killFfmpegProcess($pid)
-    {
-        if ($pid && $this->isFfmpegProcessHealthy($pid)) {
-            Log::info("MonitorStreamHealthJob: Attempting to kill FFmpeg process PID {$pid}.");
-            if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
-                 \Illuminate\Support\Facades\Process::run("taskkill /PID {$pid} /F");
+                // Step 2: Fetch a segment URL from the manifest (simplified)
+                // In a real scenario, parse the M3U8 content. For now, we assume the main URL might contain segments or is a direct stream.
+                // This is a very basic check. A robust solution would parse the M3U8, find segment URLs, and test one.
+                $segmentResponse = Http::timeout(10)->get($streamProvider->stream_url);
+                if (!$segmentResponse->successful() || empty($segmentResponse->body())) {
+                     // If fetching segments (or the stream itself if not HLS/DASH) fails after initial HEAD success
+                    $newStatus = 'offline';
+                    Log::warning("MonitorStreamHealthJob: Stream for provider {$this->stream_provider_id} failed segment check after successful HEAD. URL: {$streamProvider->stream_url}");
+                } else {
+                    // Step 3: Simulate Buffering/Stall Detection (10% chance if online)
+                    if (rand(1, 100) <= 10) {
+                        $newStatus = 'buffering';
+                        Log::info("MonitorStreamHealthJob: Simulated buffering for stream provider {$this->stream_provider_id}.");
+                    }
+                }
             } else {
-                 \Illuminate\Support\Facades\Process::run("kill -9 {$pid}");
+                Log::warning("MonitorStreamHealthJob: HEAD request failed for stream provider {$this->stream_provider_id}. Status: {$response->status()}. URL: {$streamProvider->stream_url}");
+                $newStatus = 'offline';
+            }
+        } catch (Throwable $e) {
+            Log::error("MonitorStreamHealthJob: Exception during health check for stream provider {$this->stream_provider_id}. Error: {$e->getMessage()}");
+            $newStatus = 'offline';
+        }
+
+        $oldStatus = $streamProvider->status;
+        $streamProvider->status = $newStatus;
+        $streamProvider->save();
+
+        Log::info("MonitorStreamHealthJob: Status for stream provider {$this->stream_provider_id} updated to {$newStatus}. (Old status: {$oldStatus})");
+
+        // Logic for handling problematic streams
+        if (in_array($newStatus, ['offline', 'buffering'])) {
+            if ($channel->current_stream_provider_id === $streamProvider->id) {
+                Log::error("MonitorStreamHealthJob: Currently active stream provider {$streamProvider->id} for channel {$this->channel_id} is {$newStatus}. Triggering failover process.");
+                InitiateFailoverJob::dispatch($this->channel_id, $this->stream_provider_id)->onQueue('stream-operations');
+                // Channel status will be updated by InitiateFailoverJob or subsequent monitoring
+                // For example, InitiateFailoverJob might set it to 'switching' or 'failed'
+                // $channel->stream_status = 'switching';
+                // $channel->save();
+                Log::info("MonitorStreamHealthJob: Dispatched InitiateFailoverJob for channel {$this->channel_id} due to provider {$streamProvider->id} status: {$newStatus}.");
+            }
+        } elseif ($newStatus === 'online') {
+            if ($oldStatus && in_array($oldStatus, ['offline', 'buffering'])) {
+                 Log::info("MonitorStreamHealthJob: Stream provider {$streamProvider->id} for channel {$this->channel_id} recovered. Old status: {$oldStatus}, New status: {$newStatus}.");
+            }
+
+            if ($channel->current_stream_provider_id !== $streamProvider->id) {
+                $currentProvider = $channel->currentStreamProvider;
+                if ($currentProvider && $streamProvider->priority < $currentProvider->priority) { // Lower number means higher priority
+                    Log::info("MonitorStreamHealthJob: Stream provider {$streamProvider->id} (priority {$streamProvider->priority}) for channel {$this->channel_id} is online and has higher priority than current active provider {$channel->current_stream_provider_id} (priority {$currentProvider->priority}).");
+                    // Future: Logic to switch back to higher priority stream could be triggered here or by a separate job.
+                } elseif (!$currentProvider) {
+                     Log::info("MonitorStreamHealthJob: Stream provider {$streamProvider->id} for channel {$this->channel_id} is online. Channel has no current active provider. This could be a candidate for activation.");
+                     // This could be a case where the channel was fully offline and this is the first provider to come back online.
+                     // A separate mechanism might be needed to make it active, or InitiateFailoverJob could handle this.
+                }
+            } else {
+                // Stream is online and is the current provider, ensure channel status reflects this
+                if ($channel->stream_status !== 'playing') {
+                    $channel->stream_status = 'playing';
+                    $channel->save();
+                    Log::info("MonitorStreamHealthJob: Channel {$this->channel_id} stream_status set to 'playing' as current provider {$streamProvider->id} is online.");
+                }
             }
         }
+        Log::info("MonitorStreamHealthJob finished for channel_id: {$this->channel_id}, stream_provider_id: {$this->stream_provider_id}");
     }
 
-    private function markStreamProblematic(ChannelStream $channelStream, string $reason)
+    /**
+     * Handle a job failure.
+     */
+    public function failed(Throwable $exception): void
     {
-        Log::warning("MonitorStreamHealthJob: Marking stream {$channelStream->id} as problematic. Reason: {$reason}");
-        $channelStream->status = 'problematic';
-        $channelStream->last_error_at = now();
-        $channelStream->consecutive_stall_count = 0;
-        $channelStream->save();
-    }
+        Log::error("MonitorStreamHealthJob FAILED for channel_id: {$this->channel_id}, stream_provider_id: {$this->stream_provider_id}. Error: {$exception->getMessage()}");
 
-    private function initiateFailover(UserStreamSession $userStreamSession, ChannelStream $failedStream, Channel $channel, string $reason)
-    {
-        Log::info("MonitorStreamHealthJob: Initiating failover for session {$userStreamSession->session_id}, channel {$channel->id} from stream {$failedStream->id}. Reason: {$reason}");
+        $streamProvider = ChannelStreamProvider::find($this->stream_provider_id);
+        if ($streamProvider) {
+            $streamProvider->status = 'offline'; // Mark as offline on job failure
+            $streamProvider->last_checked_at = now();
+            $streamProvider->save();
+            Log::info("MonitorStreamHealthJob: Marked provider {$this->stream_provider_id} as 'offline' due to job failure.");
 
-        $userStreamSession->ffmpeg_pid = null;
-        $userStreamSession->worker_pid = null;
-        // Keep last segment info for now, might be useful for debugging, or clear it:
-        // $userStreamSession->last_segment_media_sequence = null;
-        // $userStreamSession->last_segment_at = null;
-        $userStreamSession->save();
-
-        $nextStream = $channel->channelStreams()
-            ->where('id', '!=', $failedStream->id)
-            ->where('status', '!=', 'disabled')
-            ->where(function ($query) {
-                $query->where('status', '!=', 'problematic')
-                      ->orWhere('last_error_at', '<', now()->subMinutes(1));
-            })
-            ->orderBy('priority', 'asc')
-            ->first();
-
-        if ($nextStream) {
-            Log::info("MonitorStreamHealthJob: Failing over session {$userStreamSession->session_id} for channel {$channel->id} to new stream_id {$nextStream->id}.");
-            $userStreamSession->active_channel_stream_id = $nextStream->id;
-            $userStreamSession->save(); // Save new active stream first
-
-            // Dispatch job to start the new stream.
-            StartStreamProcessingJob::dispatch($userStreamSession->id)->onQueue('streaming');
-
-        } else {
-            Log::error("MonitorStreamHealthJob: No alternative streams available for failover for session {$userStreamSession->session_id}, channel {$channel->id}.");
+            $channel = Channel::find($this->channel_id);
+            if ($channel && $channel->current_stream_provider_id === $streamProvider->id) {
+                 Log::error("MonitorStreamHealthJob: Currently active stream provider {$streamProvider->id} for channel {$this->channel_id} failed its job. Triggering failover.");
+                 InitiateFailoverJob::dispatch($this->channel_id, $this->stream_provider_id)->onQueue('stream-operations');
+                 // $channel->stream_status = 'failed'; // InitiateFailoverJob should handle this
+                 // $channel->save();
+                 Log::info("MonitorStreamHealthJob: Dispatched InitiateFailoverJob for channel {$this->channel_id} due to job failure of current provider {$streamProvider->id}.");
+            }
         }
     }
 }

@@ -2,70 +2,199 @@
 
 namespace App\Models;
 
+use App\Enums\ChannelLogoType;
+use App\Facades\ProxyFacade;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
-use App\Models\ChannelFailover;
-use App\Models\Playlist; // Added Playlist model
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasManyThrough;
+use Illuminate\Support\Facades\Log;
+use Symfony\Component\Process\Process as SymfonyProcess;
+use Spatie\Tags\HasTags;
 
 class Channel extends Model
 {
     use HasFactory;
+    use HasTags;
 
+    /**
+     * The attributes that are mass assignable.
+     *
+     * @var array<int, string>
+     */
     protected $fillable = [
-        'name',
-        'active_channel_stream_id',
+        'title',
+        'channel_id_within_playlist',
+        'url',
+        'url_custom',
+        'logo',
+        'logo_type',
+        'enabled',
+        'channel',
+        'shift',
+        'user_id',
+        'playlist_id',
+        'group_id',
+        'epg_channel_id',
+        'extvlcopt',
+        'kodidrop',
+        'editable_attributes',
+        'icon_preference_enabled',
+        'custom_channel_id',
+        'custom_channel_url',
+        'sort',
+        'auto_channel_output_option',
+        'current_stream_provider_id',
+        'stream_status',
+        // Add other fillable attributes as needed
     ];
 
     /**
-     * Get all of the streams for the Channel.
+     * The attributes that should be cast to native types.
+     *
+     * @var array
      */
-    public function channelStreams(): HasMany
+    protected $casts = [
+        'id' => 'integer',
+        'enabled' => 'boolean',
+        'channel' => 'integer',
+        'shift' => 'integer',
+        'user_id' => 'integer',
+        'playlist_id' => 'integer',
+        'group_id' => 'integer',
+        'extvlcopt' => 'array',
+        'kodidrop' => 'array',
+        'logo_type' => ChannelLogoType::class,
+        'current_stream_provider_id' => 'integer',
+        'icon_preference_enabled' => 'boolean',
+        'editable_attributes' => 'array',
+    ];
+
+    public function user(): BelongsTo
     {
-        return $this->hasMany(ChannelStream::class);
+        return $this->belongsTo(User::class);
     }
 
-    /**
-     * Get the active stream for the Channel.
-     */
-    public function activeStream(): BelongsTo
-    {
-        return $this->belongsTo(ChannelStream::class, 'active_channel_stream_id');
-    }
-
-    /**
-     * Get the failover configurations for this channel.
-     * These point to other channels that can act as backups.
-     */
-    public function failovers(): HasMany
-    {
-        return $this->hasMany(ChannelFailover::class, 'channel_id', 'id')->orderBy('sort', 'asc');
-    }
-
-    /**
-     * Get the playlist that this channel belongs to.
-     */
     public function playlist(): BelongsTo
     {
-        // Assuming 'playlist_id' is the foreign key on the 'channels' table
         return $this->belongsTo(Playlist::class);
     }
 
-    /**
-     * Get the display name formatted for Filament select components.
-     */
-    public function getFilamentSelectNameAttribute(): string
+    public function group(): BelongsTo
     {
-        $displayName = $this->name; // Default to name
-        if (!empty($this->title_custom)) {
-            $displayName = $this->title_custom;
-        } elseif (!empty($this->title)) {
-            $displayName = $this->title;
-        }
+        return $this->belongsTo(Group::class);
+    }
 
-        // Assuming 'playlist' relationship exists and is a BelongsTo
-        $playlistName = $this->playlist?->name ?? 'N/A';
-        return "{$displayName} [{$playlistName}]";
+    public function epgChannel(): BelongsTo
+    {
+        return $this->belongsTo(EpgChannel::class)
+            ->withoutEagerLoads();
+    }
+
+    public function customPlaylists(): BelongsToMany
+    {
+        return $this->belongsToMany(CustomPlaylist::class, 'channel_custom_playlist');
+    }
+
+    public function failovers()
+    {
+        return $this->hasMany(ChannelFailover::class, 'channel_id');
+    }
+
+    public function failoverChannels(): HasManyThrough
+    {
+        return $this->hasManyThrough(
+            Channel::class, // Deploy
+            ChannelFailover::class, // Environment
+            'channel_id', // Foreign key on the environments table...
+            'id', // Foreign key on the deployments table...
+            'id', // Local key on the projects table...
+            'channel_failover_id' // Local key on the environments table...
+        )->orderBy('channel_failovers.sort');
+    }
+
+    public function streamProviders(): HasMany
+    {
+        return $this->hasMany(ChannelStreamProvider::class)->orderBy('priority');
+    }
+
+    public function currentStreamProvider(): BelongsTo
+    {
+        return $this->belongsTo(ChannelStreamProvider::class, 'current_stream_provider_id');
+    }
+
+    /**
+     * The attributes that are mass assignable.
+     *
+     * @var string
+     */
+    public function getProxyUrlAttribute(): string
+    {
+        return ProxyFacade::getProxyUrlForChannel(
+            $this->id,
+            $this->playlist->proxy_options['output'] ?? 'ts'
+        );
+    }
+
+    /**
+     * Get the stream attributes.
+     *
+     * @var array
+     */
+    public function getStreamStatsAttribute(): array
+    {
+        try {
+            $url = $this->url_custom ?? $this->url;
+            $process = SymfonyProcess::fromShellCommandline(
+                "ffprobe -v quiet -print_format json -show_streams {$url}"
+            );
+            $process->setTimeout(10);
+            $output = '';
+            $errors = '';
+            $hasErrors = false;
+            $process->run(
+                function ($type, $buffer) use (&$output, &$hasErrors, &$errors) {
+                    if ($type === SymfonyProcess::OUT) {
+                        $output .= $buffer;
+                    }
+                    if ($type === SymfonyProcess::ERR) {
+                        $hasErrors = true;
+                        $errors .= $buffer;
+                    }
+                }
+            );
+            if ($hasErrors) {
+                Log::error("Error running ffprobe for channel \"{$this->title}\": {$errors}");
+                return [];
+            }
+            $json = json_decode($output, true);
+            if (isset($json['streams']) && is_array($json['streams'])) {
+                $streamStats = [];
+                foreach ($json['streams'] as $stream) {
+                    if (isset($stream['codec_name'])) {
+                        $streamStats[]['stream'] = [
+                            'codec_type' => $stream['codec_type'],
+                            'codec_name' => $stream['codec_name'],
+                            'codec_long_name' => $stream['codec_long_name'] ?? null,
+                            'profile' => $stream['profile'] ?? null,
+                            'width' => $stream['width'] ?? null,
+                            'height' => $stream['height'] ?? null,
+                            'bit_rate' => $stream['bit_rate'] ?? null,
+                            'avg_frame_rate' => $stream['avg_frame_rate'] ?? null,
+                            'display_aspect_ratio' => $stream['display_aspect_ratio'] ?? null,
+                            'sample_rate' => $stream['sample_rate'] ?? null,
+                            'channels' => $stream['channels'] ?? null,
+                            'channel_layout' => $stream['channel_layout'] ?? null,
+                        ];
+                    }
+                }
+                return $streamStats;
+            }
+        } catch (\Exception $e) {
+            Log::error("Error running ffprobe for channel \"{$this->title}\": {$e->getMessage()}");
+        }
+        return [];
     }
 }

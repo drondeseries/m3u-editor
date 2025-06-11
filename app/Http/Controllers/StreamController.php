@@ -2,311 +2,663 @@
 
 namespace App\Http\Controllers;
 
+use Exception;
 use App\Models\Channel;
-use App\Models\ChannelStream;
-use App\Models\UserStreamSession; // Assuming this model exists
+use App\Models\Episode;
+use App\Services\ProxyService;
+use App\Exceptions\SourceNotResponding;
+use App\Traits\TracksActiveStreams;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Process; // For ffprobe
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
-use App\Jobs\StartStreamProcessingJob; // Assuming this job will be created
-use Illuminate\Support\Str; // For generating session_id if needed
-use Symfony\Component\HttpFoundation\Response; // For HTTP status codes
+use Illuminate\Support\Facades\Redis;
+use Symfony\Component\HttpFoundation\StreamedResponse;
+use Symfony\Component\Process\Process as SymfonyProcess;
 
 class StreamController extends Controller
 {
-    const FFPROBE_TIMEOUT_SECONDS = 3;
-    const FFMPEG_STALL_THRESHOLD_SECONDS = 15; // Example, actual segment monitoring will be in the job
+    use TracksActiveStreams;
 
     /**
-     * Handles the request for a stream.
+     * Stream a channel.
      *
      * @param Request $request
-     * @param int $channel_id
-     * @return \Illuminate\Http\JsonResponse|\Symfony\Component\HttpFoundation\StreamedResponse
-     */
-    public function getStream(Request $request, $channel_id)
-    {
-        // 0. Get or create a unique session identifier for the user/request
-        // $user = $request->user(); // If using Laravel authentication
-        // $session_id = $user ? 'user_' . $user->id : $request->session()->getId();
-        // For simplicity without full user auth setup, let's use a cookie-based or generated session ID
-        $session_id = $request->cookie('stream_session_id') ?: Str::uuid()->toString();
-
-        $channel = Channel::findOrFail($channel_id);
-
-        // 1. Try to find an existing UserStreamSession for this user/session and channel
-        $userStreamSession = UserStreamSession::where('session_id', $session_id)
-            ->where('channel_id', $channel->id)
-            ->first();
-
-        $selectedChannelStream = null;
-
-        if ($userStreamSession && $userStreamSession->activeChannelStream) {
-            // User already has an active stream session for this channel.
-            // Check if its FFmpeg process is still considered healthy (quick check)
-            // This is a basic check; more detailed monitoring is in MonitorStreamHealthJob
-            if ($this->isFfmpegProcessHealthy($userStreamSession->ffmpeg_pid)) {
-                $selectedChannelStream = $userStreamSession->activeChannelStream;
-                Log::info("StreamController: Existing healthy session found for session_id {$session_id}, channel {$channel_id}, stream_id {$selectedChannelStream->id}");
-            } else {
-                Log::warning("StreamController: Existing session for session_id {$session_id}, channel {$channel_id} found, but FFmpeg PID {$userStreamSession->ffmpeg_pid} is not healthy. Attempting to find new stream.");
-                // Mark this specific session's stream attempt as failed/stale if needed, or let Monitor job handle it.
-                // For now, just proceed to select a new stream.
-                $userStreamSession->delete(); // Or update status; deleting forces re-selection.
-                $userStreamSession = null; // Force re-creation or selection.
-            }
-        }
-
-        if (!$selectedChannelStream) {
-            // 2. Select the best available stream if no healthy session or stream exists
-            $availableStreams = $channel->channelStreams()
-                ->where('status', '!=', 'disabled') // Exclude explicitly disabled streams
-                ->where(function ($query) { // Prefer non-problematic, or problematic not checked recently
-                    $query->where('status', '!=', 'problematic')
-                          ->orWhere('last_error_at', '<', now()->subMinutes(5)); // Retry problematic streams after 5 mins
-                })
-                ->orderBy('priority', 'asc')
-                ->get();
-
-            if ($availableStreams->isEmpty()) {
-                Log::error("StreamController: No available streams for channel_id {$channel_id}.");
-                return response()->json(['error' => 'Channel currently unavailable.'], Response::HTTP_NOT_FOUND);
-            }
-
-            foreach ($availableStreams as $stream) {
-                if ($this->isValidStreamSource($stream)) {
-                    $selectedChannelStream = $stream;
-                    Log::info("StreamController: Selected stream_id {$stream->id} for channel {$channel_id} after ffprobe validation.");
-                    break;
-                } else {
-                    Log::warning("StreamController: Stream_id {$stream->id} for channel {$channel_id} failed ffprobe validation.");
-                    $stream->status = 'problematic';
-                    $stream->last_error_at = now();
-                    $stream->consecutive_failure_count = $stream->consecutive_failure_count + 1;
-                    $stream->save();
-                }
-            }
-
-            if (!$selectedChannelStream) {
-                Log::error("StreamController: All available streams for channel_id {$channel_id} failed ffprobe validation.");
-                return response()->json(['error' => 'Channel currently unavailable due to source issues.'], Response::HTTP_SERVICE_UNAVAILABLE);
-            }
-        }
-
-        // 3. Create or update UserStreamSession
-        if (!$userStreamSession) {
-            $userStreamSession = UserStreamSession::create([
-                'session_id' => $session_id,
-                'user_id' => null, // Replace with $user->id if auth is used
-                'channel_id' => $channel->id,
-                'active_channel_stream_id' => $selectedChannelStream->id,
-                'session_started_at' => now(),
-                'last_activity_at' => now(),
-            ]);
-        } else {
-            // If session existed but stream was unhealthy, update it to the new stream
-            $userStreamSession->active_channel_stream_id = $selectedChannelStream->id;
-            $userStreamSession->ffmpeg_pid = null; // Will be set by the job
-            $userStreamSession->worker_pid = null; // Will be set by the job
-            $userStreamSession->last_segment_at = null;
-            $userStreamSession->last_segment_media_sequence = null;
-            $userStreamSession->last_activity_at = now();
-            $userStreamSession->save();
-        }
-
-        // Update channel's active stream if it has changed (simplistic, could be more nuanced)
-        if ($channel->active_channel_stream_id !== $selectedChannelStream->id) {
-             // This is a global change, perhaps only do this if the previous active_stream_id was problematic
-             // For now, let's assume any valid selection can become the "globally preferred" active one if it's better
-             // $channel->active_channel_stream_id = $selectedChannelStream->id;
-             // $channel->save();
-             // More sophisticated logic needed here based on overall stream health.
-        }
-
-        // 4. Dispatch Job to Start/Ensure FFmpeg is running for this UserStreamSession
-        // The job will handle the actual FFmpeg process and its PID management.
-        StartStreamProcessingJob::dispatch($userStreamSession->id)->onQueue('streaming');
-
-
-        // 5. Return the M3U8 URL to the client.
-        // The client will fetch this URL, and FFmpeg (managed by the job) will serve segments to it.
-        // The URL should be unique per session to allow multiple users to watch the same channel via different source streams if needed
-        // or if one user's ffmpeg process dies and restarts on a new source.
-        $m3u8Url = route('stream.hls.master', ['sessionId' => $userStreamSession->session_id, 'channelStreamId' => $selectedChannelStream->id]);
-
-        // It's important to set the cookie for subsequent requests if it was newly generated.
-        $response = response()->json(['m3u8_url' => $m3u8Url]);
-        if (!$request->cookie('stream_session_id')) {
-            $response->cookie('stream_session_id', $session_id, 60 * 24 * 7); // Cookie for 7 days
-        }
-        return $response;
-    }
-
-    /**
-     * Serves the HLS master playlist for a given user stream session.
-     * This is what the client player will actually request based on m3u8_url from getStream.
-     * The actual HLS segments are served by FFmpeg directly to storage, and then by the webserver.
-     * This method ensures the playlist file exists and points to the correct segments.
-     */
-    public function serveMasterPlaylist(Request $request, $sessionId, $channelStreamId)
-    {
-        $userStreamSession = UserStreamSession::where('session_id', $sessionId)
-                                ->where('active_channel_stream_id', $channelStreamId)
-                                ->firstOrFail();
-
-        // Update last activity for the session
-        $userStreamSession->last_activity_at = now();
-        $userStreamSession->save();
-
-        $playlistPath = storage_path("app/hls/{$userStreamSession->session_id}_{$channelStreamId}/master.m3u8");
-
-        // Check if playlist exists and is recent enough (FFmpeg job should be creating/updating it)
-        // This is a basic check. The job is responsible for its health.
-        if (!file_exists($playlistPath) || (time() - filemtime($playlistPath)) > self::FFMPEG_STALL_THRESHOLD_SECONDS * 2) {
-            Log::warning("StreamController: Master playlist not found or stale for session_id {$sessionId}, stream_id {$channelStreamId}. Path: {$playlistPath}");
-            // Optionally, re-dispatch StartStreamProcessingJob if FFmpeg seems to have died.
-            // StartStreamProcessingJob::dispatch($userStreamSession->id)->onQueue('streaming');
-            return response()->json(['error' => 'Stream is starting or has encountered an issue. Please try again shortly.'], Response::HTTP_SERVICE_UNAVAILABLE);
-        }
-
-        // It's crucial that the web server (Nginx/Apache) is configured to serve .m3u8 and .ts files from the storage/app/hls directory.
-        // Laravel itself typically doesn't serve these files directly in production for performance.
-        // For development, or if direct serving is needed:
-        // return response()->file($playlistPath, ['Content-Type' => 'application/vnd.apple.mpegurl']);
-        // In a typical setup, you'd redirect or ensure the client can fetch this path.
-        // For now, let's assume the path is accessible via web server config.
-        // The URL provided to client should point to where webserver serves this file.
-        // The `route('stream.hls.master', ...)` should map to a public URL.
-        // This function is more of a placeholder for how the client gets the playlist.
-        // The actual serving of M3U8 and TS files is best handled by Nginx/Apache for performance.
-        // If using Laravel to serve:
-        if (file_exists($playlistPath)) {
-            return response()->file($playlistPath, [
-                'Content-Type' => 'application/vnd.apple.mpegurl',
-                'Content-Disposition' => 'inline; filename="master.m3u8"',
-            ]);
-        }
-        Log::error("StreamController: Master playlist file does not exist at expected path: {$playlistPath}");
-        return response("Playlist not found.", Response::HTTP_NOT_FOUND);
-    }
-
-    /**
-     * Serves HLS segment files.
-     * NOTE: THIS IS GENERALLY NOT RECOMMENDED FOR PRODUCTION.
-     * HLS segments should be served by a web server (Nginx, Apache) directly for performance.
-     * This is a simplified example if direct serving via Laravel is temporarily needed.
-     */
-    public function serveSegment(Request $request, $sessionId, $channelStreamId, $segmentName)
-    {
-         // Basic validation for segment name to prevent directory traversal
-        if (!preg_match('/^segment_\d{3}\.ts$/', $segmentName)) {
-            return response("Invalid segment name.", Response::HTTP_BAD_REQUEST);
-        }
-
-        $segmentPath = storage_path("app/hls/{$sessionId}_{$channelStreamId}/{$segmentName}");
-
-        if (file_exists($segmentPath)) {
-            return response()->file($segmentPath, [
-                'Content-Type' => 'video/mp2t', // MPEG-TS
-                'Content-Disposition' => 'inline; filename="' . $segmentName . '"',
-            ]);
-        }
-        return response("Segment not found.", Response::HTTP_NOT_FOUND);
-    }
-
-
-    /**
-     * Quick check if an FFmpeg process is likely healthy.
-     * This is a very basic check. More robust checks are in the Monitor job.
-     * @param int|null $pid
-     * @return bool
-     */
-    private function isFfmpegProcessHealthy($pid)
-    {
-        if (!$pid) {
-            return false;
-        }
-        // On Linux/macOS, check if process exists. This is OS-dependent.
-        // `ps -p $pid` returns 0 if process exists.
-        if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
-            // Windows: tasklist /FI "PID eq $pid"
-            // This is more complex to parse reliably here.
-            // For simplicity, assume if PID exists, it might be healthy for this quick check.
-            // A more robust solution would involve proper process management libraries.
-            return true; // Placeholder for Windows
-        } else {
-            // Linux/macOS
-            $result = Process::run("ps -p {$pid}");
-            return $result->successful() && Str::contains($result->output(), (string)$pid);
-        }
-    }
-
-    /**
-     * Validates a stream source using ffprobe.
+     * @param int|string $encodedId
+     * @param string $format
      *
-     * @param ChannelStream $channelStream
-     * @return bool
+     * @return StreamedResponse
      */
-    private function isValidStreamSource(ChannelStream $channelStream): bool
-    {
-        $command = [
-            'ffprobe',
-            '-v', 'quiet',
-            '-print_format', 'json',
-            '-show_streams',
-            '-show_format',
-            '-user_agent', 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.90 Safari/537.36', // Generic User Agent
-            $channelStream->stream_url
-        ];
+    public function __invoke(
+        Request $request,
+        $encodedId,
+        $format = 'ts',
+    ) {
+        // Validate the format
+        if (!in_array($format, ['ts', 'mp4'])) {
+            abort(400, 'Invalid format specified.');
+        }
 
-        try {
-            // Using Laravel's Process facade
-            $result = Process::timeout(self::FFPROBE_TIMEOUT_SECONDS)->run(implode(' ', $command));
+        // Find the channel by ID
+        if (strpos($encodedId, '==') === false) {
+            $encodedId .= '=='; // right pad to ensure proper decoding
+        }
+        $channel = Channel::findOrFail(base64_decode($encodedId));
 
-            if (!$result->successful()) {
-                Log::warning("isValidStreamSource: ffprobe failed for {$channelStream->stream_url}. Error: " . $result->errorOutput());
-                return false;
+        // Get the failover channels (if any)
+        $sourceChannel = $channel;
+        $streams = collect([$channel])->concat($channel->failoverChannels);
+        $streamCount = $streams->count();
+
+        // Loop over the failover channels and grab the first one that works.
+        foreach ($streams as $stream) {
+            // Get the title for the channel
+            $title = $stream->title_custom ?? $stream->title;
+            $title = strip_tags($title);
+
+            // Check if playlist is specified
+            $playlist = $stream->playlist;
+
+            // Make sure we have a valid source channel
+            $badSourceCacheKey = ProxyService::BAD_SOURCE_CACHE_PREFIX . $stream->id . ':' . $playlist->id;
+            if (Redis::exists($badSourceCacheKey)) {
+                if ($sourceChannel->id === $stream->id) {
+                    Log::channel('ffmpeg')->debug("Skipping source ID {$title} ({$sourceChannel->id}) for as it was recently marked as bad. Reason: " . (Redis::get($badSourceCacheKey) ?: 'N/A'));
+                } else {
+                    Log::channel('ffmpeg')->debug("Skipping Failover Channel {$stream->name} for source {$title} ({$sourceChannel->id}) as it was recently marked as bad. Reason: " . (Redis::get($badSourceCacheKey) ?: 'N/A'));
+                }
+                continue;
             }
 
-            $output = json_decode($result->output(), true);
+            // Keep track of the active streams for this playlist using optimistic locking pattern
+            $activeStreams = $this->incrementActiveStreams($playlist->id);
 
-            if (json_last_error() !== JSON_ERROR_NONE) {
-                Log::warning("isValidStreamSource: Failed to decode ffprobe JSON output for {$channelStream->stream_url}. Output: " . $result->output());
-                return false;
+            // Then check if we're over limit
+            // Ignore for MP4 since those will be requests from Video.js
+            // Video.js will make a request for the metadate before loading the stream, so can use twp connections in a short amount of time
+            if ($format !== 'mp4' && $this->wouldExceedStreamLimit($playlist->id, $playlist->available_streams, $activeStreams)) {
+                // We're over limit, so decrement and skip
+                $this->decrementActiveStreams($playlist->id);
+                Log::channel('ffmpeg')->debug("Max streams reached for playlist {$playlist->name} ({$playlist->id}). Skipping channel {$title}.");
+                continue;
             }
 
-            // Check for at least one audio or video stream
-            if (empty($output['streams'])) {
-                 Log::warning("isValidStreamSource: No streams found by ffprobe for {$channelStream->stream_url}.");
-                return false;
+            // Setup streams array
+            $streamUrl = $stream->url_custom ?? $stream->url;
+
+            // Determine the output format
+            $ip = $request->ip();
+            $streamId = uniqid();
+            $channelId = $stream->id;
+            $contentType = $format === 'ts' ? 'video/MP2T' : 'video/mp4';
+
+            // Start the stream for the current source (primary or failover channel)
+            try {
+                return $this->startStream(
+                    type: 'channel',
+                    modelId: $channelId,
+                    streamUrl: $streamUrl,
+                    title: $title,
+                    format: $format,
+                    ip: $ip,
+                    streamId: $streamId,
+                    contentType: $contentType,
+                    userAgent: $playlist->user_agent ?? null,
+                    failoverSupport: $format === 'ts', // Only support failover for TS streams
+                    playlistId: $playlist->id
+                );
+            } catch (SourceNotResponding $e) {
+                // Log the error and cache the bad source
+                $this->decrementActiveStreams($playlist->id);
+                Log::channel('ffmpeg')->error("Source not responding for channel {$title}: " . $e->getMessage());
+                Redis::setex($badSourceCacheKey, ProxyService::BAD_SOURCE_CACHE_SECONDS, $e->getMessage());
+
+                // Try the next failover channel
+                continue;
+            } catch (Exception $e) {
+                // Log the error and abort
+                $this->decrementActiveStreams($playlist->id);
+                Log::channel('ffmpeg')->error("Error streaming channel {$title}: " . $e->getMessage());
+                Redis::setex($badSourceCacheKey, ProxyService::BAD_SOURCE_CACHE_SECONDS, $e->getMessage());
+
+                // Try the next failover channel
+                continue;
+            }
+        }
+
+        // Out of streams to try
+        Log::channel('ffmpeg')->error("No available streams for channel {$channel->id} ({$channel->title}).");
+        abort(503, 'No valid streams found for this channel.');
+    }
+
+    /**
+     * Stream an episode.
+     *
+     * @param Request $request
+     * @param int|string $encodedId
+     * @param string $format
+     *
+     * @return StreamedResponse
+     */
+    public function episode(
+        Request $request,
+        $encodedId,
+        $format = 'ts',
+    ) {
+        // Validate the format
+        if (!in_array($format, ['ts', 'mp4'])) {
+            abort(400, 'Invalid format specified.');
+        }
+
+        // Find the channel by ID
+        if (strpos($encodedId, '==') === false) {
+            $encodedId .= '=='; // right pad to ensure proper decoding
+        }
+        $episode = Episode::findOrFail(base64_decode($encodedId));
+        $title = $episode->title;
+        $title = strip_tags($title);
+
+        // Check if playlist is specified
+        $playlist = $episode->playlist;
+
+        // Keep track of the active streams for this playlist using optimistic locking pattern
+        $activeStreams = $this->incrementActiveStreams($playlist->id);
+
+        // Then check if we're over limit
+        // Ignore for MP4 since those will be requests from Video.js
+        // Video.js will make a request for the metadate before loading the stream, so can use twp connections in a short amount of time
+        if ($format !== 'mp4' && $this->wouldExceedStreamLimit($playlist->id, $playlist->available_streams, $activeStreams)) {
+            // We're over limit, so decrement and skip
+            $this->decrementActiveStreams($playlist->id);
+            Log::channel('ffmpeg')->debug("Max streams reached for playlist {$playlist->name} ({$playlist->id}). Aborting episode {$title}.");
+            abort(503, 'Max streams reached for this playlist.');
+        }
+
+        // Setup streams array
+        $streamUrl = $episode->url;
+
+        // Determine the output format
+        $ip = $request->ip();
+        $streamId = uniqid();
+        $episodeId = $episode->id;
+        $contentType = $format === 'ts' ? 'video/MP2T' : 'video/mp4';
+
+        // Start the stream
+        return $this->startStream(
+            type: 'episode',
+            modelId: $episodeId,
+            streamUrl: $streamUrl,
+            title: $title,
+            format: $format,
+            ip: $ip,
+            streamId: $streamId,
+            contentType: $contentType,
+            userAgent: $playlist->user_agent ?? null,
+            failoverSupport: $format === 'ts', // Only support failover for TS streams
+            playlistId: $playlist->id
+        );
+    }
+
+    /**
+     * Start the stream using FFmpeg.
+     *
+     * @param string $type
+     * @param int $modelId
+     * @param string $streamUrl
+     * @param string $title
+     * @param string $format
+     * @param string $ip
+     * @param string $streamId
+     * @param string $contentType
+     * @param string|null $userAgent
+     * @param bool $failoverSupport Whether to support failover streams
+     * @param int|null $playlistId Optional playlist ID for tracking active streams
+     *
+     * @return StreamedResponse
+     */
+    private function startStream(
+        $type,
+        $modelId,
+        $streamUrl,
+        $title,
+        $format,
+        $ip,
+        $streamId,
+        $contentType,
+        $userAgent,
+        $failoverSupport = false,
+        $playlistId = null
+    ) {
+        // Prevent timeouts, etc.
+        ini_set('max_execution_time', 0);
+        ini_set('output_buffering', 'off');
+        ini_set('implicit_flush', 1);
+
+        // Get user preferences
+        $settings = ProxyService::getStreamSettings();
+
+        // Get user agent
+        $userAgent = escapeshellarg($userAgent) ?: escapeshellarg($settings['ffmpeg_user_agent']);
+
+        // If failover support is enabled, we need to run a pre-check with ffprobe to ensure the source is valid
+        if ($failoverSupport) {
+            // Determine the command/path for ffmpeg execution first
+            $ffmpegExecutable = config('proxy.ffmpeg_path') ?: $settings['ffmpeg_path'];
+            if (empty($ffmpegExecutable)) {
+                $ffmpegExecutable = 'jellyfin-ffmpeg'; // Default ffmpeg command
             }
 
-            $has_av_stream = false;
-            foreach($output['streams'] as $stream_info) {
-                if (isset($stream_info['codec_type']) && ($stream_info['codec_type'] === 'video' || $stream_info['codec_type'] === 'audio')) {
-                    $has_av_stream = true;
+            // Next, derive the ffprobe path based on `ffmpegExecutable`
+            if (str_contains($ffmpegExecutable, '/')) {
+                $ffprobePath = dirname($ffmpegExecutable) . '/ffprobe';
+            } else {
+                $ffprobePath = 'ffprobe';
+            }
+            $ffprobeTimeout = $settings['ffmpeg_ffprobe_timeout'] ?? 5; // Default timeout for ffprobe
+
+            // Updated command to include -show_format and remove -select_streams to get all streams for detailed info
+            $precheckCmd = "$ffprobePath -v quiet -print_format json -show_streams -show_format -user_agent " . $userAgent . " " . escapeshellarg($streamUrl);
+
+            Log::channel('ffmpeg')->debug("[PRE-CHECK] Executing ffprobe command for [{$title}] with timeout {$ffprobeTimeout}s: {$precheckCmd}");
+            $precheckProcess = SymfonyProcess::fromShellCommandline($precheckCmd);
+            $precheckProcess->setTimeout($ffprobeTimeout);
+            try {
+                $precheckProcess->run();
+                if (!$precheckProcess->isSuccessful()) {
+                    Log::channel('ffmpeg')->error("[PRE-CHECK] ffprobe failed for source [{$title}]. Exit Code: " . $precheckProcess->getExitCode() . ". Error Output: " . $precheckProcess->getErrorOutput());
+                    throw new SourceNotResponding("failed_ffprobe (Exit: " . $precheckProcess->getExitCode() . ")");
+                }
+                Log::channel('ffmpeg')->debug("[PRE-CHECK] ffprobe successful for source [{$title}].");
+
+                // Check channel health
+                $ffprobeJsonOutput = $precheckProcess->getOutput();
+                $streamInfo = json_decode($ffprobeJsonOutput, true);
+                $extractedDetails = [];
+
+                if (json_last_error() === JSON_ERROR_NONE && !empty($streamInfo)) {
+                    // Format Section
+                    if (isset($streamInfo['format'])) {
+                        $streamFormat = $streamInfo['format'];
+                        $extractedDetails['format'] = [
+                            'duration' => $streamFormat['duration'] ?? null,
+                            'size' => $streamFormat['size'] ?? null,
+                            'bit_rate' => $streamFormat['bit_rate'] ?? null,
+                            'nb_streams' => $streamFormat['nb_streams'] ?? null,
+                            'tags' => $streamFormat['tags'] ?? [],
+                        ];
+                    }
+
+                    $videoStreamFound = false;
+                    $audioStreamFound = false;
+
+                    if (isset($streamInfo['streams']) && is_array($streamInfo['streams'])) {
+                        foreach ($streamInfo['streams'] as $stream) {
+                            if (!$videoStreamFound && isset($stream['codec_type']) && $stream['codec_type'] === 'video') {
+                                $extractedDetails['video'] = [
+                                    'codec_long_name' => $stream['codec_long_name'] ?? null,
+                                    'width' => $stream['width'] ?? null,
+                                    'height' => $stream['height'] ?? null,
+                                    'color_range' => $stream['color_range'] ?? null,
+                                    'color_space' => $stream['color_space'] ?? null,
+                                    'color_transfer' => $stream['color_transfer'] ?? null,
+                                    'color_primaries' => $stream['color_primaries'] ?? null,
+                                    'tags' => $stream['tags'] ?? [],
+                                ];
+                                $logResolution = ($stream['width'] ?? 'N/A') . 'x' . ($stream['height'] ?? 'N/A');
+                                Log::channel('ffmpeg')->debug(
+                                    "[PRE-CHECK] Source [{$title}] video stream: " .
+                                        "Codec: " . ($stream['codec_name'] ?? 'N/A') . ", " .
+                                        "Format: " . ($stream['pix_fmt'] ?? 'N/A') . ", " .
+                                        "Resolution: " . $logResolution . ", " .
+                                        "Profile: " . ($stream['profile'] ?? 'N/A') . ", " .
+                                        "Level: " . ($stream['level'] ?? 'N/A')
+                                );
+                                $videoStreamFound = true;
+                            } elseif (!$audioStreamFound && isset($stream['codec_type']) && $stream['codec_type'] === 'audio') {
+                                $extractedDetails['audio'] = [
+                                    'codec_name' => $stream['codec_name'] ?? null,
+                                    'profile' => $stream['profile'] ?? null,
+                                    'channels' => $stream['channels'] ?? null,
+                                    'channel_layout' => $stream['channel_layout'] ?? null,
+                                    'tags' => $stream['tags'] ?? [],
+                                ];
+                                $audioStreamFound = true;
+                            }
+                            if ($videoStreamFound && $audioStreamFound) {
+                                break;
+                            }
+                        }
+                    }
+                    if (!empty($extractedDetails)) {
+                        $detailsCacheKey = "mpts:streaminfo:details:{$streamId}";
+                        Redis::setex($detailsCacheKey, 86400, json_encode($extractedDetails)); // Cache for 24 hours
+                        Log::channel('ffmpeg')->debug("[PRE-CHECK] Cached detailed streaminfo for {$type} ID {$modelId}.");
+                    }
+                } else {
+                    Log::channel('ffmpeg')->warning("[PRE-CHECK] Could not decode ffprobe JSON output for [{$title}]. Output: " . $ffprobeJsonOutput);
+                }
+            } catch (Exception $e) {
+                throw new SourceNotResponding("failed_ffprobe_exception (" . $e->getMessage() . ")");
+            }
+        }
+
+        // Store the process start time
+        $startTimeCacheKey = "mpts:streaminfo:starttime:{$streamId}";
+        $currentTime = now()->timestamp;
+        Redis::setex($startTimeCacheKey, 604800, $currentTime); // 7 days TTL
+        Log::channel('ffmpeg')->debug("Stored ffmpeg process start time for {$type} ID {$modelId} at {$currentTime}");
+
+        // Set the content type based on the format
+        return new StreamedResponse(function () use (
+            $modelId,
+            $type,
+            $playlistId,
+            $streamUrl,
+            $title,
+            $settings,
+            $format,
+            $ip,
+            $streamId,
+            $userAgent
+        ) {
+            // Set unique client key (order is used for stats output)
+            // E.g. $clientDetailss = Redis::smembers('mpts:active_ids');
+            //      Loop over the client keys and extract the details:
+            //      `explode('::', $clientDetails)` will return [ip, modelId, type, streamId]
+            $clientDetails = "{$ip}::{$modelId}::{$type}::{$streamId}";
+
+            // Make sure PHP doesn't ignore user aborts
+            ignore_user_abort(false);
+
+            // Register a shutdown function that ALWAYS runs when the script dies
+            $self = $this;
+            register_shutdown_function(function () use ($clientDetails, $streamId, $playlistId, $type, $title, $self) {
+                Redis::srem('mpts:active_ids', $clientDetails);
+                Redis::del("mpts:streaminfo:details:{$streamId}");
+                Redis::del("mpts:streaminfo:starttime:{$streamId}");
+                if ($playlistId) {
+                    // Decrement the active streams count using the trait
+                    $self->decrementActiveStreams($playlistId);
+                }
+                Log::channel('ffmpeg')->debug("Streaming stopped for {$type} {$title}");
+            });
+
+            // Add the client key to the active IDs set
+            Redis::sadd('mpts:active_ids', $clientDetails);
+
+            // Clear any existing output buffers
+            // This is important for real-time streaming
+            while (ob_get_level()) {
+                ob_end_flush();
+            }
+            flush();
+
+            // Disable output buffering to ensure real-time streaming
+            ini_set('zlib.output_compression', 0);
+
+            // Set the maximum number of retries
+            $maxRetries = $settings['ffmpeg_max_tries'];
+
+            // Build the FFmpeg command
+            $cmd = $this->buildCmd(
+                $format,
+                $streamUrl,
+                $userAgent
+            );
+
+            // Log the command for debugging
+            Log::channel('ffmpeg')->debug("Streaming {$type} {$title} with command: {$cmd}");
+
+            // Continue trying until the client disconnects, or max retries are reached
+            $retries = 0;
+            while (!connection_aborted()) {
+                // Start the streaming process!
+                $process = SymfonyProcess::fromShellCommandline($cmd);
+                $process->setTimeout(null);
+                try {
+                    $process->run(function ($type, $buffer) {
+                        if (connection_aborted()) {
+                            throw new \Exception("Connection aborted by client.");
+                        }
+                        if ($type === SymfonyProcess::OUT) {
+                            echo $buffer;
+                            flush();
+                            usleep(10000); // Reduce CPU usage
+                        }
+                        if ($type === SymfonyProcess::ERR) {
+                            if (!empty(trim($buffer))) {
+                                // Log the line if it's not empty
+                                Log::channel('ffmpeg')->error($buffer);
+                            }
+                        }
+                    });
+                } catch (\Exception $e) {
+                    // Log eror and attempt to reconnect.
+                    if (!connection_aborted()) {
+                        Log::channel('ffmpeg')
+                            ->error("Error streaming $type (\"$title\"): " . $e->getMessage());
+                    }
+                }
+
+                // If we get here, the process ended.
+                if (connection_aborted()) {
+                    if ($process->isRunning()) {
+                        $process->stop(1); // SIGTERM then SIGKILL
+                    }
+                    return;
+                }
+                if (++$retries >= $maxRetries) {
+                    // Log error and stop trying this stream...
+                    Log::channel('ffmpeg')
+                        ->error("FFmpeg error: max retries of $maxRetries reached for stream for $type $title.");
+
+                    // ...break and try the next stream
                     break;
                 }
-            }
-            if (!$has_av_stream) {
-                Log::warning("isValidStreamSource: No audio or video streams found by ffprobe for {$channelStream->stream_url}.");
-                return false;
+                // Wait a short period before trying to reconnect.
+                sleep(min(8, $retries));
             }
 
-            return true;
+            echo "Error: No available streams.";
+        }, 200, [
+            'Content-Type' => $contentType,
+            'Connection' => 'keep-alive',
+            'Cache-Control' => 'no-store, no-transform',
+            'Content-Disposition' => "inline; filename=\"stream.$format\"",
+            'X-Accel-Buffering' => 'no',
+        ]);
+    }
 
-        } catch (\Symfony\Component\Process\Exception\ProcessTimedOutException $e) {
-            Log::warning("isValidStreamSource: ffprobe timed out for {$channelStream->stream_url}.");
-            return false;
-        } catch (\Exception $e) {
-            Log::error("isValidStreamSource: Exception during ffprobe for {$channelStream->stream_url}: " . $e->getMessage());
-            return false;
+    /**
+     * Build the FFmpeg command for streaming.
+     *
+     * @param string $format
+     * @param string $streamUrl
+     * @param string $userAgent
+     *
+     * @return string The complete FFmpeg command
+     */
+    private function buildCmd($format, $streamUrl, $userAgent): string
+    {
+        // Get default stream settings
+        $settings = ProxyService::getStreamSettings();
+        $customCommandTemplate = $settings['ffmpeg_custom_command_template'] ?? null;
+
+        // Get user defined options
+        $userArgs = config('proxy.ffmpeg_additional_args', '');
+        if (!empty($userArgs)) {
+            $userArgs .= ' ';
         }
+
+        // Get ffmpeg path
+        $ffmpegPath = config('proxy.ffmpeg_path') ?: $settings['ffmpeg_path'];
+        if (empty($ffmpegPath)) {
+            $ffmpegPath = 'jellyfin-ffmpeg';
+        }
+
+        // Determine the effective video codec based on config and settings
+        $videoCodec = ProxyService::determineVideoCodec(
+            config('proxy.ffmpeg_codec_video', null),
+            $settings['ffmpeg_codec_video'] ?? 'copy' // Default to 'copy' if not set
+        );
+
+        // Command construction logic
+        if (empty($customCommandTemplate)) {
+            // Initialize FFmpeg command argument variables
+            $hwaccelInitArgs = '';
+            $hwaccelArgs = '';
+            $videoFilterArgs = '';
+            $codecSpecificArgs = ''; // For QSV or other codec-specific args not part of -vf
+
+            // Get base ffmpeg output codec formats (these are defaults or from non-QSV/VA-API settings)
+            $audioCodec = (config('proxy.ffmpeg_codec_audio') ?: ($settings['ffmpeg_codec_audio'] ?? null)) ?: 'copy';
+            $subtitleCodec = (config('proxy.ffmpeg_codec_subtitles') ?: ($settings['ffmpeg_codec_subtitles'] ?? null)) ?: 'copy';
+
+            // Hardware Acceleration Logic
+            if ($settings['ffmpeg_vaapi_enabled'] ?? false) {
+                $videoCodec = 'h264_vaapi'; // Default VA-API H.264 encoder
+                if (!empty($settings['ffmpeg_vaapi_device'])) {
+                    $escapedDevice = escapeshellarg($settings['ffmpeg_vaapi_device']);
+                    $hwaccelInitArgs = "-init_hw_device vaapi=va_device:{$escapedDevice} ";
+                    $hwaccelArgs = "-hwaccel vaapi -hwaccel_device va_device -hwaccel_output_format vaapi -filter_hw_device va_device ";
+                }
+                if (!empty($settings['ffmpeg_vaapi_video_filter'])) {
+                    $videoFilterArgs = "-vf " . escapeshellarg(trim($settings['ffmpeg_vaapi_video_filter'], "'\",")) . " ";
+                } else {
+                    $videoFilterArgs = "-vf 'scale_vaapi=format=nv12' ";
+                }
+            } else if ($settings['ffmpeg_qsv_enabled'] ?? false) {
+                $videoCodec = 'h264_qsv'; // Default QSV H.264 encoder
+
+                // Simplify QSV initialization - don't specify device path directly
+                $hwaccelInitArgs = "-init_hw_device qsv=qsv_device ";
+                $hwaccelArgs = "-hwaccel qsv -hwaccel_device qsv_device -hwaccel_output_format qsv -filter_hw_device qsv_device ";
+
+                if (!empty($settings['ffmpeg_qsv_video_filter'])) {
+                    $videoFilterArgs = "-vf " . escapeshellarg(trim($settings['ffmpeg_qsv_video_filter'], "'\",")) . " ";
+                } else {
+                    // Default QSV video filter, matches user's working example
+                    $videoFilterArgs = "-vf 'hwupload=extra_hw_frames=64,scale_qsv=format=nv12' ";
+                }
+
+                // Additional QSV specific options
+                $codecSpecificArgs = $settings['ffmpeg_qsv_encoder_options'] ? escapeshellarg($settings['ffmpeg_qsv_encoder_options']) : '-preset medium -global_quality 23';
+                if (!empty($settings['ffmpeg_qsv_additional_args'])) {
+                    $userArgs = trim($settings['ffmpeg_qsv_additional_args']) . ($userArgs ? " " . $userArgs : "");
+                }
+            }
+
+            // Set the output format and codecs
+            $output = $format === 'ts'
+                ? "-c:v {$videoCodec} " . ($codecSpecificArgs ? trim($codecSpecificArgs) . " " : "") . "-c:a {$audioCodec} -c:s {$subtitleCodec} -f mpegts pipe:1"
+                : "-c:v {$videoCodec} -ac 2 -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof pipe:1";
+
+            // Determine if it's an MKV file by extension
+            $isMkv = stripos($streamUrl, '.mkv') !== false;
+
+            // Build the FFmpeg command
+            $cmd = escapeshellcmd($ffmpegPath) . ' ';
+            $cmd .= $hwaccelInitArgs;
+            $cmd .= $hwaccelArgs;
+
+            // Better error handling
+            $cmd .= '-err_detect ignore_err -ignore_unknown ';
+
+            // Pre-input HTTP options:
+            $cmd .= "-user_agent " . $userAgent . " -referer " . escapeshellarg("MyComputer") . " " .
+                '-multiple_requests 1 -reconnect_on_network_error 1 ' .
+                '-reconnect_on_http_error 5xx,4xx -reconnect_streamed 1 ' .
+                '-reconnect_delay_max 5';
+
+            if ($isMkv) {
+                $cmd .= ' -analyzeduration 10M -probesize 10M';
+            }
+            $cmd .= ' -noautorotate ';
+
+            // User defined general options:
+            $cmd .= $userArgs;
+
+            // Input:
+            $cmd .= '-i ' . escapeshellarg($streamUrl) . ' ';
+
+            // Video Filter arguments:
+            $cmd .= $videoFilterArgs;
+
+            // Output options from $output variable:
+            $cmd .= $output;
+        } else {
+            // Custom command template is provided
+            $cmd = $customCommandTemplate;
+
+            // Prepare placeholder values
+            $hwaccelInitArgsValue = '';
+            $hwaccelArgsValue = '';
+            $videoFilterArgsValue = '';
+
+            // QSV options
+            $qsvEncoderOptionsValue = $settings['ffmpeg_qsv_encoder_options'] ? escapeshellarg($settings['ffmpeg_qsv_encoder_options']) : '';
+            $qsvAdditionalArgsValue = $settings['ffmpeg_qsv_additional_args'] ? escapeshellarg($settings['ffmpeg_qsv_additional_args']) : '';
+
+            // Determine codec type
+            $isVaapiCodec = str_contains($videoCodec, '_vaapi');
+            $isQsvCodec = str_contains($videoCodec, '_qsv');
+
+            if ($settings['ffmpeg_vaapi_enabled'] ?? false) {
+                $videoCodec = $isVaapiCodec ? $videoCodec : 'h264_vaapi'; // Default to h264_vaapi if not already set
+                if (!empty($settings['ffmpeg_vaapi_device'])) {
+                    $hwaccelInitArgsValue = "-init_hw_device vaapi=va_device:" . escapeshellarg($settings['ffmpeg_vaapi_device']) . " -filter_hw_device va_device ";
+                    $hwaccelArgsValue = "-hwaccel vaapi -hwaccel_device va_device -hwaccel_output_format vaapi ";
+                }
+                if (!empty($settings['ffmpeg_vaapi_video_filter'])) {
+                    $videoFilterArgsValue = "-vf " . escapeshellarg(trim($settings['ffmpeg_vaapi_video_filter'], "'\",")) . " ";
+                }
+            } else if ($settings['ffmpeg_qsv_enabled'] ?? false) {
+                $videoCodec = $isQsvCodec ? $videoCodec : 'h264_qsv'; // Default to h264_qsv if not already set
+                if (!empty($settings['ffmpeg_qsv_device'])) {
+                    $hwaccelInitArgsValue = "-init_hw_device qsv=qsv_hw:" . escapeshellarg($settings['ffmpeg_qsv_device']) . " ";
+                    $hwaccelArgsValue = '-hwaccel qsv -hwaccel_device qsv_hw -hwaccel_output_format qsv ';
+                }
+                if (!empty($settings['ffmpeg_qsv_video_filter'])) {
+                    $videoFilterArgsValue = "-vf " . escapeshellarg(trim($settings['ffmpeg_qsv_video_filter'], "'\",")) . " ";
+                }
+
+                // Additional QSV specific options
+                $codecSpecificArgs = $settings['ffmpeg_qsv_encoder_options'] ? escapeshellarg($settings['ffmpeg_qsv_encoder_options']) : '';
+                if (!empty($settings['ffmpeg_qsv_additional_args'])) {
+                    $userArgs = trim($settings['ffmpeg_qsv_additional_args']) . ($userArgs ? " " . $userArgs : "");
+                }
+            }
+
+            $videoCodecForTemplate = $settings['ffmpeg_codec_video'] ?: 'copy';
+            $audioCodecForTemplate = (config('proxy.ffmpeg_codec_audio') ?: ($settings['ffmpeg_codec_audio'] ?? null)) ?: 'copy';
+            $subtitleCodecForTemplate = (config('proxy.ffmpeg_codec_subtitles') ?: ($settings['ffmpeg_codec_subtitles'] ?? null)) ?: 'copy';
+
+            $outputCommandSegment = $format === 'ts'
+                ? "-c:v {$videoCodecForTemplate} -c:a {$audioCodecForTemplate} -c:s {$subtitleCodecForTemplate} -f mpegts pipe:1"
+                : "-c:v {$videoCodecForTemplate} -ac 2 -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof pipe:1";
+
+            $videoCodecArgs = "-c:v {$videoCodecForTemplate}";
+            $audioCodecArgs = "-c:a {$audioCodecForTemplate}";
+            $subtitleCodecArgs = "-c:s {$subtitleCodecForTemplate}";
+
+            // Perform replacements
+            $cmd = str_replace('{FFMPEG_PATH}', escapeshellcmd($ffmpegPath), $cmd);
+            $cmd = str_replace('{INPUT_URL}', escapeshellarg($streamUrl), $cmd);
+            $cmd = str_replace('{OUTPUT_OPTIONS}', $outputCommandSegment, $cmd);
+            $cmd = str_replace('{USER_AGENT}', $userAgent, $cmd); // $userAgent is already escaped
+            $cmd = str_replace('{REFERER}', escapeshellarg("MyComputer"), $cmd);
+            $cmd = str_replace('{HWACCEL_INIT_ARGS}', $hwaccelInitArgsValue, $cmd);
+            $cmd = str_replace('{HWACCEL_ARGS}', $hwaccelArgsValue, $cmd);
+            $cmd = str_replace('{VIDEO_FILTER_ARGS}', $videoFilterArgsValue, $cmd);
+            $cmd = str_replace('{VIDEO_CODEC_ARGS}', $videoCodecArgs, $cmd);
+            $cmd = str_replace('{AUDIO_CODEC_ARGS}', $audioCodecArgs, $cmd);
+            $cmd = str_replace('{SUBTITLE_CODEC_ARGS}', $subtitleCodecArgs, $cmd);
+            $cmd = str_replace('{QSV_ENCODER_OPTIONS}', $qsvEncoderOptionsValue, $cmd);
+            $cmd = str_replace('{QSV_ADDITIONAL_ARGS}', $qsvAdditionalArgsValue, $cmd);
+            $cmd = str_replace('{ADDITIONAL_ARGS}', $userArgs, $cmd); // If user wants to include general additional args
+        }
+
+        // ... rest of the options and command suffix ...
+        $cmd .= ($settings['ffmpeg_debug'] ? ' -loglevel verbose' : ' -hide_banner -loglevel error');
+
+        return $cmd;
     }
 }
-
-// Placeholder for routes (web.php or api.php):
-// Route::get('/stream/channel/{channel_id}/request', [App\Http\Controllers\StreamController::class, 'getStream'])->name('stream.request');
-// Route::get('/stream/hls/{sessionId}/{channelStreamId}/master.m3u8', [App\Http\Controllers\StreamController::class, 'serveMasterPlaylist'])->name('stream.hls.master');
-// Route::get('/stream/hls/{sessionId}/{channelStreamId}/{segmentName}', [App\Http\Controllers\StreamController::class, 'serveSegment'])->where('segmentName', 'segment_\d{3}\.ts')->name('stream.hls.segment');

@@ -870,52 +870,60 @@ class ChannelResource extends Resource
                         ->simple(
                             Forms\Components\Select::make('channel_failover_id')
                                 ->label('Failover Channel')
-                                ->getOptionLabelUsing(fn ($value): ?string => \App\Models\Channel::find($value)?->filament_select_name)
-                                ->searchable()
-                                ->getSearchResultsUsing(function (string $search, Get $get, $livewire) {
-                                    $searchLower = strtolower($search);
-
-                                    // Get IDs of channels already used in this repeater instance for 'failovers'
-                                    // $get('../../failovers') gets the state of all items in the repeater
-                                    $repeaterItems = $get('../../failovers') ?? [];
-                                    $existingFailoverIdsInRepeater = collect($repeaterItems)
-                                        ->pluck('channel_failover_id')
-                                        ->filter() // Remove nulls if any item is new and doesn't have it set
-                                        ->toArray();
-
-                                    // Get the ID of the main channel record being edited (the "master" channel)
-                                    $masterChannelId = null;
-                                    if ($livewire->ownerRecord instanceof \App\Models\Channel) {
-                                        $masterChannelId = $livewire->ownerRecord->id;
-                                    } elseif (method_exists($livewire, 'getRecord') && $livewire->getRecord() instanceof \App\Models\Channel) {
-                                        $masterChannelId = $livewire->getRecord()->id;
+                                ->options(function ($state, $record) {
+                                    // Get the current channel ID to exclude it from options
+                                    if (!$state) {
+                                        return [];
                                     }
-                                    // Fallback if ownerRecord is not available directly (e.g. during creation before save)
-                                    // In such cases, $masterChannelId will be null, and we can't exclude it, which is fine.
-
-                                    $idsToExclude = array_unique(array_filter(array_merge($existingFailoverIdsInRepeater, [$masterChannelId])));
-
-                                    $channelsQuery = \App\Models\Channel::where('user_id', auth()->id()) // Assuming channels are user-specific
-                                        ->with('playlist') // Eager load for the accessor
-                                        ->where(function ($query) use ($searchLower) {
-                                            $query->whereRaw('LOWER(name) LIKE ?', ["%{$searchLower}%"])
-                                                  ->orWhereRaw('LOWER(COALESCE(title_custom, title)) LIKE ?', ["%{$searchLower}%"]) // Search in title_custom or title
-                                                  ->orWhereRaw('LOWER(stream_id) LIKE ?', ["%{$searchLower}%"])
-                                                  ->orWhereRaw('LOWER(COALESCE(stream_id_custom, stream_id)) LIKE ?', ["%{$searchLower}%"]);
-                                        });
-
-                                    if (!empty($idsToExclude)) {
-                                        $channelsQuery->whereNotIn('id', $idsToExclude);
+                                    $channel = \App\Models\Channel::find($state);
+                                    if (!$channel) {
+                                        return [];
                                     }
 
-                                    return $channelsQuery->limit(50)
-                                        ->get()
-                                        ->mapWithKeys(function (\App\Models\Channel $channel) {
-                                            return [$channel->id => $channel->filament_select_name];
-                                        })
-                                        ->toArray();
+                                    // Return the single channel as the only results if not searching
+                                    $displayTitle = $channel->title_custom ?: $channel->title;
+                                    $playlistName = $channel->playlist->name ?? 'Unknown';
+                                    return [$channel->id => "{$displayTitle} [{$playlistName}]"];
                                 })
-                                ->required()
+                                ->searchable()
+                                ->getSearchResultsUsing(function (string $search, $get, $livewire) {
+                                    $existingFailoverIds = collect($get('../../failovers') ?? [])
+                                        ->filter(fn($failover) => $failover['channel_failover_id'] ?? null)
+                                        ->pluck('channel_failover_id')
+                                        ->toArray();
+
+                                    // Get parent record ID to exclude it from search results
+                                    $parentRecordId = $livewire->mountedTableActionsData[0]['id'] ?? null;
+                                    if ($parentRecordId) {
+                                        $existingFailoverIds[] = $parentRecordId;
+                                    }
+
+                                    // Always include the selected value if it exists
+                                    $searchLower = strtolower($search);
+                                    $channels = Auth::user()->channels()
+                                        ->withoutEagerLoads()
+                                        ->with('playlist')
+                                        ->whereNotIn('id', $existingFailoverIds)
+                                        ->where(function ($query) use ($searchLower) {
+                                            $query->whereRaw('LOWER(title) LIKE ?', ["%{$searchLower}%"])
+                                                ->orWhereRaw('LOWER(title_custom) LIKE ?', ["%{$searchLower}%"])
+                                                ->orWhereRaw('LOWER(name) LIKE ?', ["%{$searchLower}%"])
+                                                ->orWhereRaw('LOWER(name_custom) LIKE ?', ["%{$searchLower}%"])
+                                                ->orWhereRaw('LOWER(stream_id) LIKE ?', ["%{$searchLower}%"]);
+                                        })
+                                        ->limit(50) // Keep a reasonable limit
+                                        ->get();
+
+                                    // Create options array
+                                    $options = [];
+                                    foreach ($channels as $channel) {
+                                        $displayTitle = $channel->title_custom ?: $channel->title;
+                                        $playlistName = $channel->playlist->name ?? 'Unknown';
+                                        $options[$channel->id] = "{$displayTitle} [{$playlistName}]";
+                                    }
+
+                                    return $options;
+                                })->required()
                         )
                         ->distinct()
                         ->columns(1)
