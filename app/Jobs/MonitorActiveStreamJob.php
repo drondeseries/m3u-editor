@@ -11,7 +11,6 @@ use Illuminate\Support\Facades\Log;
 use App\Models\Channel;
 use App\Models\Episode;
 use App\Services\HlsStreamService;
-use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Redis;
 use Illuminate\Support\Facades\Config; // Added for config access
 use Throwable; // Added for broad exception catching
