@@ -11,6 +11,19 @@ class ChannelFailover extends Model
     use HasFactory;
 
     /**
+     * The attributes that are mass assignable.
+     *
+     * @var array<int, string>
+     */
+    protected $fillable = [
+        'user_id',
+        'channel_id',
+        'channel_failover_id',
+        'sort',
+        'metadata',
+    ];
+
+    /**
      * The attributes that should be cast to native types.
      *
      * @var array
