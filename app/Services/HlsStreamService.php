@@ -56,7 +56,20 @@ class HlsStreamService
             Log::info("HlsStreamService: No active FFmpeg process for channel {$channel->id} ('{$originalChannelTitle}'). Proceeding to stop/cleanup and select provider.");
             $this->stopStream('channel', $channel->id, false); // Cleanup, don't decrement regular count
 
+            // Debugging provider fetching
+            Log::debug("HlsStreamService: Channel {$channel->id} ('{$originalChannelTitle}') - Checking stream providers. Relation count: " . $channel->streamProviders()->count());
+            $allProviders = $channel->streamProviders()->get(); // Get all, regardless of is_active for debugging
+            if ($allProviders->isEmpty()) {
+                Log::debug("HlsStreamService: Channel {$channel->id} ('{$originalChannelTitle}') - No providers found by the streamProviders() relationship at all.");
+            } else {
+                foreach ($allProviders as $idx => $p) {
+                    Log::debug("HlsStreamService: Channel {$channel->id} ('{$originalChannelTitle}') - Provider #{$idx} (All): ID={$p->id}, URL=" . ($p->stream_url ?? 'N/A') . ", Priority={$p->priority}, IsActive=" . ($p->is_active ? 'true' : 'false') . ", Status=" . ($p->status ?? 'N/A'));
+                }
+            }
+
             $streamProviders = $channel->streamProviders()->where('is_active', true)->orderBy('priority')->get();
+            Log::debug("HlsStreamService: Channel {$channel->id} ('{$originalChannelTitle}') - Found " . $streamProviders->count() . " active providers after filtering by is_active=true.");
+
 
             if ($streamProviders->isEmpty()) {
                 Log::error("HlsStreamService: No active stream providers available for channel {$channel->id} ('{$originalChannelTitle}'). Cannot start stream.");
