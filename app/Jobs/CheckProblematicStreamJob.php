@@ -17,11 +17,11 @@ class CheckProblematicStreamJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $tries = 5; // Allow more attempts for problematic streams
-    public int $timeout = 60; // Shorter timeout as it's a re-check
-    public int $backoff = 60; // Delay in seconds before retrying
+    public int $tries = 5;
+    public int $timeout = 60;
+    public int $backoff = 60; // Delay in seconds before retrying a failed job execution
 
-    protected const RELEASE_DELAY_SECONDS = 300; // 5 minutes
+    protected const RELEASE_DELAY_SECONDS = 300; // 5 minutes for self-release if still offline
 
     /**
      * Create a new job instance.
@@ -36,87 +36,98 @@ class CheckProblematicStreamJob implements ShouldQueue
      */
     public function handle(): void
     {
-        Log::info("CheckProblematicStreamJob: Starting for stream_provider_id: {$this->stream_provider_id}. Attempt: {$this->attempts()}/{$this->tries}");
+        $baseLogPrefix = "CheckProblematicStreamJob: [stream_provider_id: {$this->stream_provider_id}, attempt: {$this->attempts()}/{$this->tries}]";
+        Log::info("{$baseLogPrefix} Starting health re-check.");
 
-        $streamProvider = ChannelStreamProvider::with('channel')->find($this->stream_provider_id);
+        $streamProvider = ChannelStreamProvider::with('channel', 'channel.currentStreamProvider')->find($this->stream_provider_id);
 
         if (!$streamProvider) {
-            Log::error("CheckProblematicStreamJob: ChannelStreamProvider with id {$this->stream_provider_id} not found. Job aborting.");
+            Log::error("{$baseLogPrefix} ChannelStreamProvider not found. Job aborting.");
             return;
         }
 
         $channel = $streamProvider->channel;
+        // Construct a detailed name for logging early, check for null channel first
+        $channelNameForLog = "channel " . ($channel ? $channel->id . " ('" . strip_tags($channel->title_custom ?? $channel->title) . "')" : "UNKNOWN_CHANNEL");
+        $providerLogName = "provider {$streamProvider->id} ('{$streamProvider->provider_name}', URL: {$streamProvider->stream_url}) for {$channelNameForLog}";
+        $logPrefix = "CheckProblematicStreamJob: [{$providerLogName}, attempt: {$this->attempts()}]";
+
+
         if (!$channel) {
-            // This case should ideally not happen if DB integrity is maintained.
-            Log::error("CheckProblematicStreamJob: Channel not found for stream provider {$this->stream_provider_id} (URL: {$streamProvider->stream_url}). Marking provider as 'offline'.");
+            Log::error("{$logPrefix} Channel not found for this provider. Marking provider as 'offline'.");
             $streamProvider->status = 'offline';
             $streamProvider->last_checked_at = now();
             $streamProvider->save();
+            Log::info("{$logPrefix} Job finished due to missing channel link.");
             return;
         }
 
-        $providerLogName = "provider {$streamProvider->id} ('{$streamProvider->provider_name}', URL: {$streamProvider->stream_url}) for channel {$channel->id} ('" . strip_tags($channel->title_custom ?? $channel->title) . "')";
-        Log::debug("CheckProblematicStreamJob: Processing {$providerLogName}.");
+        Log::debug("{$logPrefix} Processing health re-check. Current provider status: {$streamProvider->status}");
 
         $streamProvider->last_checked_at = now();
         $newStatus = 'offline';
         $exceptionMessage = null;
 
         try {
-            Log::debug("CheckProblematicStreamJob: [{$providerLogName}] Performing HTTP HEAD request.");
+            Log::debug("{$logPrefix} Performing HTTP HEAD request to {$streamProvider->stream_url}.");
             $response = Http::timeout(5)->head($streamProvider->stream_url);
 
             if ($response->successful()) {
                 $newStatus = 'online';
-                Log::info("CheckProblematicStreamJob: [{$providerLogName}] HEAD request successful. Status set to 'online'.");
+                Log::info("{$logPrefix} HEAD request successful. Provider determined to be 'online'.");
             } else {
-                Log::warning("CheckProblematicStreamJob: [{$providerLogName}] HEAD request failed. HTTP Status: {$response->status()}. Status set to 'offline'.");
+                Log::warning("{$logPrefix} HEAD request failed. HTTP Status: {$response->status()}. Provider determined to be 'offline'.");
                 $newStatus = 'offline';
             }
         } catch (Throwable $e) {
             $exceptionMessage = $e->getMessage();
-            Log::error("CheckProblematicStreamJob: [{$providerLogName}] Exception during health check: {$exceptionMessage}", ['exception' => $e]);
+            Log::error("{$logPrefix} Exception during health check: {$exceptionMessage}", ['exception_trace' => $e->getTraceAsString()]);
             $newStatus = 'offline';
         }
 
         $oldStatus = $streamProvider->status;
         if ($oldStatus !== $newStatus || $exceptionMessage) {
-            Log::info("CheckProblematicStreamJob: [{$providerLogName}] Status changing from '{$oldStatus}' to '{$newStatus}'.", $exceptionMessage ? ['error' => $exceptionMessage] : []);
+            Log::info("{$logPrefix} Status changing from '{$oldStatus}' to '{$newStatus}'.", $exceptionMessage ? ['error' => $exceptionMessage] : []);
         }
         $streamProvider->status = $newStatus;
         $streamProvider->save();
 
         if ($newStatus === 'online') {
-            Log::info("CheckProblematicStreamJob: {$providerLogName} has recovered and is now 'online'.");
+            Log::info("{$logPrefix} Provider has recovered and is now 'online'.");
 
             if ($channel->current_stream_provider_id !== $streamProvider->id) {
-                $currentActiveProvider = $channel->currentStreamProvider; // Eager loaded via with('channel.currentStreamProvider') might be better if needed often
-                if ($currentActiveProvider && $streamProvider->priority < $currentActiveProvider->priority) { // Lower number means higher priority
-                    Log::info("CheckProblematicStreamJob: Recovered {$providerLogName} (priority {$streamProvider->priority}) has higher priority than current active provider {$currentActiveProvider->id} ('{$currentActiveProvider->provider_name}', priority {$currentActiveProvider->priority}) for channel {$channel->id}. Potential switch-back candidate.");
-                    // Future: Could dispatch a job like PossibleSwitchBackToPrimaryJob::dispatch($channel->id, $streamProvider->id);
+                $currentActiveProvider = $channel->currentStreamProvider;
+                if ($currentActiveProvider && $streamProvider->priority < $currentActiveProvider->priority) {
+                    Log::info("{$logPrefix} Recovered provider (priority {$streamProvider->priority}) has higher priority than current active provider {$currentActiveProvider->id} ('{$currentActiveProvider->provider_name}', priority {$currentActiveProvider->priority}). Potential switch-back candidate for {$channelNameForLog}.");
+                    // Example: InitiateSwitchBackJob::dispatch($channel->id, $streamProvider->id)->onQueue('stream-operations');
                 } elseif (!$currentActiveProvider && $channel->stream_status === 'failed') {
-                     Log::info("CheckProblematicStreamJob: Recovered {$providerLogName} is online. Channel {$channel->id} was 'failed' and has no active provider. This provider is a candidate for activation. An InitiateFailoverJob might be needed or next client request could trigger startStream.");
-                     // If channel is 'failed', we might want to proactively try to make it play again.
-                     // InitiateFailoverJob::dispatch($channel->id)->onQueue('stream-operations'); // General failover check for the channel
+                     Log::info("{$logPrefix} Recovered provider is online. {$channelNameForLog} was 'failed' and has no active provider. This provider is a candidate for activation. An InitiateFailoverJob (without failed_provider_id) could be dispatched or next client request might trigger startStream.");
+                     // InitiateFailoverJob::dispatch($channel->id, null)->onQueue('stream-operations');
                 } else if (!$currentActiveProvider) {
-                    Log::info("CheckProblematicStreamJob: Recovered {$providerLogName} is online. Channel {$channel->id} has no current_stream_provider_id set. Current channel status: {$channel->stream_status}.");
+                    Log::info("{$logPrefix} Recovered provider is online. {$channelNameForLog} has no current_stream_provider_id set. Current channel status: {$channel->stream_status}.");
+                } else {
+                     Log::info("{$logPrefix} Recovered provider is online, but current active provider {$currentActiveProvider->id} for {$channelNameForLog} has same or higher priority, or channel is not in a failed state.");
                 }
             } else {
-                 // Stream is online and is the current provider, ensure channel status reflects this
                  if ($channel->stream_status !== 'playing') {
                      $channel->stream_status = 'playing';
                      $channel->save();
-                     Log::info("CheckProblematicStreamJob: Recovered {$providerLogName} is the active provider for channel {$channel->id}. Channel status updated to 'playing'.");
+                     Log::info("{$logPrefix} Recovered provider is the active provider for {$channelNameForLog}. Channel status updated to 'playing'.");
                  } else {
-                    Log::info("CheckProblematicStreamJob: Recovered {$providerLogName} is already the active provider for channel {$channel->id} and channel status is 'playing'. No change needed.");
+                    Log::info("{$logPrefix} Recovered provider is already the active provider for {$channelNameForLog} and channel status is 'playing'. No change needed to channel status.");
                  }
             }
         } elseif (in_array($newStatus, ['offline', 'buffering'])) {
-            Log::info("CheckProblematicStreamJob: {$providerLogName} is still '{$newStatus}'. Re-scheduling job with delay of " . self::RELEASE_DELAY_SECONDS . " seconds. Attempt {$this->attempts()}/{$this->tries}.");
-            $this->release(self::RELEASE_DELAY_SECONDS);
+            $releaseDelay = self::RELEASE_DELAY_SECONDS * $this->attempts(); // Simple exponential backoff based on attempts
+            Log::info("{$logPrefix} Provider is still '{$newStatus}'. Re-scheduling job with delay of {$releaseDelay} seconds if attempts remaining ({$this->attempts()}/{$this->tries}).");
+            if ($this->attempts() < $this->tries) {
+                $this->release($releaseDelay);
+            } else {
+                Log::warning("{$logPrefix} Provider is still '{$newStatus}' after max attempts ({$this->tries}). Job will not be rescheduled further by release().");
+            }
         }
 
-        Log::info("CheckProblematicStreamJob: Finished for stream_provider_id: {$this->stream_provider_id}. Final provider status: {$newStatus}.");
+        Log::info("{$logPrefix} Finished processing. Final provider status: {$newStatus}.");
     }
 
     /**
@@ -124,20 +135,23 @@ class CheckProblematicStreamJob implements ShouldQueue
      */
     public function failed(Throwable $exception): void
     {
-        $logContext = [
+        $providerInfoForLog = "stream_provider_id: {$this->stream_provider_id}";
+        try {
+            $streamProvider = ChannelStreamProvider::with('channel')->find($this->stream_provider_id);
+            if ($streamProvider) {
+                $providerNamePart = "'{$streamProvider->provider_name}'";
+                $channelNamePart = $streamProvider->channel ? "'" . strip_tags($streamProvider->channel->title_custom ?? $streamProvider->channel->title) . "'" : "unknown channel";
+                $providerInfoForLog = "provider {$streamProvider->id} ({$providerNamePart}, URL: {$streamProvider->stream_url}) for channel " . ($streamProvider->channel_id ?? 'N/A') . " ({$channelNamePart})";
+            }
+        } catch (Throwable $e) {
+            // Ignore error during logging enhancement in failed method
+        }
+
+        Log::critical("CheckProblematicStreamJob: CRITICAL JOB FAILURE for {$providerInfoForLog}. Error: {$exception->getMessage()}", [
             'stream_provider_id' => $this->stream_provider_id,
+            'attempt' => $this->attempts(),
             'exception_message' => $exception->getMessage(),
             'exception_trace' => $exception->getTraceAsString(),
-        ];
-        Log::error("CheckProblematicStreamJob: CRITICAL JOB FAILURE for stream_provider_id: {$this->stream_provider_id}. Error: {$exception->getMessage()}", $logContext);
-
-        // Optional: Update provider status to 'offline' or a specific error status on final failure.
-        // $streamProvider = ChannelStreamProvider::find($this->stream_provider_id);
-        // if ($streamProvider) {
-        //     $streamProvider->status = 'error_checking'; // Example of a specific error status
-        //     $streamProvider->last_checked_at = now();
-        //     $streamProvider->save();
-        //     Log::warning("CheckProblematicStreamJob: Marked provider {$this->stream_provider_id} as 'error_checking' due to job failure after all retries.");
-        // }
+        ]);
     }
 }

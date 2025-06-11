@@ -12,6 +12,9 @@ use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
 use Throwable;
+use Illuminate\Support\Facades\Cache;
+use App\Jobs\MonitorStreamHealthJob;
+use Illuminate\Contracts\Cache\LockTimeoutException;
 
 class InitiateFailoverJob implements ShouldQueue
 {
@@ -19,6 +22,7 @@ class InitiateFailoverJob implements ShouldQueue
 
     public int $tries = 3;
     public int $timeout = 180; // Allow time for stopping and starting streams
+    public int $backoff = 60; // Delay before retrying a failed job execution
 
     /**
      * Create a new job instance.
@@ -34,101 +38,124 @@ class InitiateFailoverJob implements ShouldQueue
      */
     public function handle(HlsStreamService $hlsStreamService): void
     {
-        $channelLogName = "channel {$this->channel_id}"; // Initial log name
-        Log::info("InitiateFailoverJob: Starting for {$channelLogName}, failed_provider_id: {$this->failed_provider_id}.");
+        $baseLogPrefix = "InitiateFailoverJob: [channel_id: {$this->channel_id}, failed_provider_id: {$this->failed_provider_id}, attempt: {$this->attempts()}]";
+        Log::info("{$baseLogPrefix} Starting failover process.");
 
-        $channel = Channel::with(['streamProviders' => function ($query) {
-            $query->where('is_active', true)->orderBy('priority');
-        }])->find($this->channel_id);
+        $lockKey = "failover-job-{$this->channel_id}";
+        $lock = Cache::lock($lockKey, $this->timeout - 10); // Lock for slightly less than job timeout
 
-        if (!$channel) {
-            Log::error("InitiateFailoverJob: Channel with id {$this->channel_id} not found. Job aborting.");
-            return;
-        }
-        // Update channelLogName to include title if available
-        $channelLogName = "channel {$channel->id} ('" . strip_tags($channel->title_custom ?? $channel->title) . "')";
+        try {
+            if (!$lock->block(5)) { // Wait up to 5 seconds
+                Log::warning("{$baseLogPrefix} Could not acquire lock '{$lockKey}'. Another failover job may be active. Releasing job.");
+                $this->release(60); // Release back to queue with a delay
+                return;
+            }
+            Log::debug("{$baseLogPrefix} Lock '{$lockKey}' acquired.");
 
-        if ($channel->streamProviders->isEmpty()) {
-            Log::warning("InitiateFailoverJob: No active stream providers found for {$channelLogName}. Setting channel status to 'failed'.");
-            $channel->stream_status = 'failed';
-            $channel->current_stream_provider_id = null;
-            $channel->save();
-            Log::info("InitiateFailoverJob: Finished for {$channelLogName}. No active providers.");
-            return;
-        }
+            $channel = Channel::with(['streamProviders' => function ($query) {
+                $query->where('is_active', true)->orderBy('priority');
+            }])->find($this->channel_id);
 
-        Log::info("InitiateFailoverJob: Found {$channel->streamProviders->count()} active providers for {$channelLogName}. Current provider on channel: {$channel->current_stream_provider_id}, Explicitly failed provider: {$this->failed_provider_id}.");
+            if (!$channel) {
+                Log::error("{$baseLogPrefix} Channel not found. Job aborting.");
+                return;
+            }
 
-        $eligibleProviders = $channel->streamProviders
-            ->when($this->failed_provider_id, function ($collection) {
-                // Ensure we don't retry the provider that just triggered this failover, if it's passed.
-                return $collection->filter(function ($provider) {
-                    return $provider->id !== $this->failed_provider_id;
+            $channelLogName = "channel {$channel->id} ('" . strip_tags($channel->title_custom ?? $channel->title) . "')";
+            $logPrefix = "InitiateFailoverJob: [{$channelLogName}, failed_provider_id: {$this->failed_provider_id}, attempt: {$this->attempts()}]"; // Updated prefix
+
+            // If the channel is already playing with a different provider than the one that failed (if any),
+            // and that current provider is healthy (or at least not the one that triggered this failover),
+            // the failover might have already occurred or is no longer needed for this specific trigger.
+            if ($channel->stream_status === 'playing' && $channel->current_stream_provider_id && $channel->current_stream_provider_id !== $this->failed_provider_id) {
+                Log::info("{$logPrefix} Channel is already 'playing' with provider {$channel->current_stream_provider_id}. Failover for provider {$this->failed_provider_id} might be obsolete. Job will ensure current stream is monitored.");
+                MonitorStreamHealthJob::dispatch($channel->id, $channel->current_stream_provider_id)->onQueue('stream-monitoring');
+                return;
+            }
+
+            if ($channel->streamProviders->isEmpty()) {
+                Log::warning("{$logPrefix} No active stream providers found. Setting channel status to 'failed'.");
+                $channel->stream_status = 'failed';
+                $channel->current_stream_provider_id = null;
+                $channel->save();
+                Log::info("{$logPrefix} Job finished: No active providers.");
+                return;
+            }
+
+            Log::info("{$logPrefix} Found {$channel->streamProviders->count()} active providers. Current provider on channel: {$channel->current_stream_provider_id}.");
+
+            $eligibleProviders = $channel->streamProviders
+                ->when($this->failed_provider_id, function ($collection) {
+                    return $collection->filter(function ($provider) {
+                        return $provider->id !== $this->failed_provider_id;
+                    });
                 });
-            });
 
-        if ($eligibleProviders->isEmpty()) {
-            Log::warning("InitiateFailoverJob: No eligible providers to failover to for {$channelLogName} after excluding failed_provider_id: {$this->failed_provider_id}. Setting channel status to 'failed'.");
-            $channel->stream_status = 'failed';
-            // Not changing current_stream_provider_id here, to keep context of last attempt if any.
-            $channel->save();
-            Log::info("InitiateFailoverJob: Finished for {$channelLogName}. No eligible providers left.");
-            return;
-        }
-
-        $currentProviderIdOnChannelRecord = $channel->current_stream_provider_id;
-        $switched = false;
-
-        foreach ($eligibleProviders as $newProvider) {
-            $providerLogName = "provider {$newProvider->id} ('{$newProvider->provider_name}', URL: {$newProvider->stream_url})";
-
-            if ($newProvider->id === $currentProviderIdOnChannelRecord && $newProvider->id === $this->failed_provider_id) {
-                // This case means the currently set provider on the channel is the one that failed.
-                // We are trying it again only if it's the *only* one left in eligibleProviders.
-                // However, the filter ->when($this->failed_provider_id, ...) should prevent this unless eligibleProviders has only this one.
-                Log::warning("InitiateFailoverJob: Attempting to failover to the same provider ({$newProvider->id}) that was marked as failed for {$channelLogName}. This implies it might be the only/last option or a direct re-check was intended.");
-            } elseif ($newProvider->id === $currentProviderIdOnChannelRecord) {
-                 Log::info("InitiateFailoverJob: Next eligible provider {$newProvider->id} is the same as current active provider recorded on {$channelLogName}. This is unusual if failover was triggered by its failure, but proceeding with switch attempt.");
+            if ($eligibleProviders->isEmpty()) {
+                Log::warning("{$logPrefix} No eligible providers to failover to after excluding failed_provider_id: {$this->failed_provider_id}. Setting channel status to 'failed'.");
+                $channel->stream_status = 'failed';
+                $channel->save();
+                Log::info("{$logPrefix} Job finished: No eligible providers left.");
+                return;
             }
 
-            Log::info("InitiateFailoverJob: Attempting to switch {$channelLogName} to {$providerLogName}.");
+            $currentProviderIdOnChannelRecord = $channel->current_stream_provider_id;
+            $switched = false;
 
-            // Skip if provider is marked offline and it's NOT the one that specifically triggered this job (failed_provider_id)
-            // and also not the one currently set on the channel (currentProviderIdOnChannelRecord).
-            // This allows a re-attempt on the current or just-failed provider.
-            if ($newProvider->status === 'offline' && $newProvider->id !== $this->failed_provider_id && $newProvider->id !== $currentProviderIdOnChannelRecord) {
-                 Log::info("InitiateFailoverJob: Skipping {$providerLogName} for {$channelLogName} as its status is 'offline' and it's not the immediately problematic one. It might be checked by CheckProblematicStreamJob.");
-                 continue;
-            }
+            foreach ($eligibleProviders as $newProvider) {
+                $providerLogName = "provider {$newProvider->id} ('{$newProvider->provider_name}', URL: {$newProvider->stream_url})";
 
-            try {
-                $success = $hlsStreamService->switchStreamProvider($channel, $newProvider);
-                if ($success) {
-                    Log::info("InitiateFailoverJob: Successfully switched {$channelLogName} to new {$providerLogName}.");
-                    $switched = true;
-                    break;
-                } else {
-                    Log::warning("InitiateFailoverJob: Failed to switch {$channelLogName} to {$providerLogName}. HlsStreamService::switchStreamProvider returned false. Provider likely marked offline. Trying next provider.");
+                if ($newProvider->id === $currentProviderIdOnChannelRecord && $newProvider->id === $this->failed_provider_id) {
+                    Log::warning("{$logPrefix} Attempting to failover to the same provider ({$newProvider->id}) that was marked as failed. This implies it was the active stream and failed. Will re-attempt this provider.");
+                } elseif ($newProvider->id === $currentProviderIdOnChannelRecord) {
+                     Log::info("{$logPrefix} Next eligible provider {$newProvider->id} is the same as current active provider recorded. This is unusual if failover was triggered by its failure, but proceeding with switch attempt.");
                 }
-            } catch (Throwable $e) {
-                Log::error("InitiateFailoverJob: Exception while trying to switch {$channelLogName} to {$providerLogName}. Error: {$e->getMessage()}", ['exception' => $e]);
-                // Ensure provider is marked offline if switchStreamProvider didn't catch this specific exception type for status update
-                if ($newProvider->status !== 'offline') {
-                    $newProvider->status = 'offline';
-                    $newProvider->last_checked_at = now();
-                    $newProvider->save();
-                    Log::warning("InitiateFailoverJob: Marked {$providerLogName} as offline for {$channelLogName} due to exception during switch attempt: {$e->getMessage()}");
+
+                Log::info("{$logPrefix} Attempting to switch to {$providerLogName}.");
+
+                if ($newProvider->status === 'offline' && $newProvider->id !== $this->failed_provider_id && $newProvider->id !== $currentProviderIdOnChannelRecord) {
+                     Log::info("{$logPrefix} Skipping {$providerLogName} as its status is 'offline' and it's not the one that just failed or was current. It might be checked by CheckProblematicStreamJob.");
+                     continue;
+                }
+
+                try {
+                    // switchStreamProvider itself now contains a lock.
+                    $success = $hlsStreamService->switchStreamProvider($channel, $newProvider);
+                    if ($success) {
+                        Log::info("{$logPrefix} Successfully switched to new {$providerLogName}.");
+                        $switched = true;
+                        break;
+                    } else {
+                        Log::warning("{$logPrefix} Failed to switch to {$providerLogName}. HlsStreamService::switchStreamProvider returned false. Provider likely marked offline. Trying next provider.");
+                    }
+                } catch (Throwable $e) {
+                    Log::error("{$logPrefix} Exception while trying to switch to {$providerLogName}. Error: {$e->getMessage()}", ['exception_trace' => $e->getTraceAsString()]);
+                    if ($newProvider->status !== 'offline') { // Ensure it's marked offline on any error during switch
+                        $newProvider->status = 'offline';
+                        $newProvider->last_checked_at = now();
+                        $newProvider->save();
+                        Log::warning("{$logPrefix} Marked {$providerLogName} as offline due to exception during switch attempt: {$e->getMessage()}");
+                    }
                 }
             }
-        }
 
-        if (!$switched) {
-            Log::critical("InitiateFailoverJob: All eligible stream providers failed for {$channelLogName}. Setting channel stream_status to 'failed'. No working provider found.");
-            $channel->stream_status = 'failed';
-            // $channel->current_stream_provider_id = null; // Keep last failed provider for context
-            $channel->save();
+            if (!$switched) {
+                Log::critical("{$logPrefix} All eligible stream providers failed. Setting channel stream_status to 'failed'. No working provider found.");
+                $channel->stream_status = 'failed';
+                // $channel->current_stream_provider_id = null; // Keep last attempted for context or nullify? For now, keep.
+                $channel->save();
+            }
+            // Refresh channel for final status log
+            $channel->refresh();
+            Log::info("{$logPrefix} Finished. Switched: " . ($switched ? "yes (to provider {$channel->current_stream_provider_id})" : "no") . ". Final channel status: {$channel->stream_status}, current provider: {$channel->current_stream_provider_id}.");
+
+        } catch (LockTimeoutException $e) {
+            Log::warning("{$baseLogPrefix} LockTimeoutException. Could not acquire lock '{$lockKey}'. Releasing job.", ['exception' => $e->getMessage()]);
+            $this->release(60); // Release back to queue
+        } finally {
+            optional($lock)->release();
+            Log::debug("{$baseLogPrefix} Lock '{$lockKey}' released.");
         }
-        Log::info("InitiateFailoverJob: Finished for {$channelLogName}. Switched: " . ($switched ? "yes (to provider {$channel->current_stream_provider_id})" : "no") . ". Final channel status: {$channel->stream_status}, current provider on channel: {$channel->current_stream_provider_id}.");
     }
 
      /**
@@ -137,25 +164,23 @@ class InitiateFailoverJob implements ShouldQueue
     public function failed(Throwable $exception): void
     {
         $channelLogName = "channel {$this->channel_id}";
-        // Attempt to load channel title for richer logging
-        $channel = Channel::find($this->channel_id);
+        $channel = Channel::find($this->channel_id); // Attempt to get channel for more context
         if ($channel) {
             $channelLogName = "channel {$channel->id} ('" . strip_tags($channel->title_custom ?? $channel->title) . "')";
-        }
-
-        Log::critical("InitiateFailoverJob: CRITICAL JOB FAILURE for {$channelLogName} (Failed Provider ID: {$this->failed_provider_id}). Error: {$exception->getMessage()}", [
-            'channel_id' => $this->channel_id,
-            'failed_provider_id' => $this->failed_provider_id,
-            'exception' => $exception
-        ]);
-
-        if ($channel) {
-            // If the job itself fails, it's a severe issue. Mark channel as failed.
+            // If the job itself fails critically, ensure channel is marked as failed.
             if ($channel->stream_status !== 'failed') {
-                $channel->stream_status = 'failed';
-                $channel->save();
-                Log::error("InitiateFailoverJob: {$channelLogName} stream_status set to 'failed' due to unhandled job exception.");
+                 $channel->stream_status = 'failed';
+                 // $channel->current_stream_provider_id = null; // Consider if nullifying is best here
+                 $channel->save();
+                 Log::error("InitiateFailoverJob: {$channelLogName} stream_status set to 'failed' due to unhandled job exception in InitiateFailoverJob::failed().");
             }
         }
+
+        Log::critical("InitiateFailoverJob: CRITICAL JOB FAILURE for {$channelLogName} (Failed Provider ID was: {$this->failed_provider_id}). Error: {$exception->getMessage()}", [
+            'channel_id' => $this->channel_id,
+            'failed_provider_id' => $this->failed_provider_id,
+            'exception_message' => $exception->getMessage(),
+            'exception_trace' => $exception->getTraceAsString(),
+        ]);
     }
 }

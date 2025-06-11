@@ -60,7 +60,7 @@ class HlsStreamController extends Controller
         }
 
         $channelName = strip_tags($channel->title_custom ?? $channel->title);
-        Log::info("HLS Playlist Request: Received for channel {$channel->id} ('{$channelName}'). Current status: {$channel->stream_status}, current_provider_id: {$channel->current_stream_provider_id}.");
+        Log::info("HLS Playlist Request: Received for channel {$channel->id} ('{$channelName}'). Current status: {$channel->stream_status}, current_provider_id: {$channel->current_stream_provider_id}. IP: {$request->ip()}");
 
         return $this->servePlaylist($channel);
     }
@@ -70,7 +70,7 @@ class HlsStreamController extends Controller
      */
     public function serveChannelSegment(Request $request, int $channelId, string $segment): \Illuminate\Http\Response
     {
-        Log::debug("HLS Segment Request: Received for channel {$channelId}, segment {$segment}.");
+        Log::debug("HLS Segment Request: Received for channel {$channelId}, segment {$segment}. IP: {$request->ip()}");
         $channel = Channel::find($channelId);
         if (!$channel) {
             Log::error("HLS Segment Request: Channel {$channelId} not found for segment {$segment}. Aborting.");
@@ -92,12 +92,10 @@ class HlsStreamController extends Controller
         $episode = Episode::find($episodeId);
 
         if (!$episode) {
-            Log::channel('ffmpeg')->error("HLS Playlist: Episode not found for encoded ID {$encodedId} (decoded: {$episodeId}).");
+            Log::error("HLS Playlist Request: Episode not found for encoded ID {$encodedId} (decoded: {$episodeId}). Aborting. IP: {$request->ip()}");
             abort(404, 'Episode not found.');
         }
-        // For episodes, we assume they use the old startStream logic for now, or need a similar refactor not covered here.
-        // This is a placeholder to show it calls the original private servePlaylist logic.
-        // The main refactor is for serveChannelPlaylist.
+        Log::info("HLS Playlist Request: Received for episode {$episode->id} ('" . strip_tags($episode->title) . "'). IP: {$request->ip()}");
         return $this->serveLegacyPlaylist('episode', $encodedId, $episode, $episode->title);
     }
 
@@ -107,9 +105,10 @@ class HlsStreamController extends Controller
      */
     public function serveEpisodeSegment(Request $request, int $episodeId, string $segment): \Illuminate\Http\Response
     {
+        Log::debug("HLS Segment Request: Received for episode {$episodeId}, segment {$segment}. IP: {$request->ip()}");
         $episode = Episode::find($episodeId);
         if (!$episode) {
-             Log::channel('ffmpeg')->error("HLS Segment: Episode {$episodeId} not found for segment {$segment}.");
+             Log::error("HLS Segment Request: Episode {$episodeId} not found for segment {$segment}. Aborting.");
             abort(404, "Episode not found for segment request.");
         }
         return $this->serveSegment('episode', $episode, $segment);
@@ -178,7 +177,6 @@ class HlsStreamController extends Controller
             }
             usleep((int)($sleepSeconds * 1000000));
         }
-        // Should be unreachable due to loop logic always either returning or aborting.
         Log::error("HLS Playlist Logic: Reached unexpected end of function for channel {$channel->id} ('{$channelName}').");
         abort(500, 'Internal server error in playlist serving.');
     }
@@ -240,15 +238,18 @@ class HlsStreamController extends Controller
         $fullStoragePath = Storage::disk('app')->path("hls/{$pathPrefix}{$modelId}/{$segmentName}");
 
         if ($type === 'channel' && $model instanceof Channel) {
+            // For channels, check the current stream_status.
+            // If not 'playing' or 'switching', it's unusual to request a segment unless it's from a stale client playlist.
             if ($model->stream_status !== 'playing' && $model->stream_status !== 'switching') {
                 Log::warning("HLS Segment Logic: Channel {$modelId} ('{$modelName}') status is '{$model->stream_status}'. Segment {$segmentName} request might be for an old or failing stream.");
             }
-            // It's crucial that isRunning refers to the specific channel's single FFmpeg process.
+            // Critical check: if FFmpeg is not running AND the segment file doesn't exist, it's a definitive error.
             if (!$this->hlsService->isRunning('channel', $modelId) && !file_exists($fullStoragePath)) {
                 Log::error("HLS Segment Logic: FFmpeg process for channel {$modelId} ('{$modelName}') not running AND segment {$segmentName} not found. Aborting with 404.");
                 abort(404, 'Stream not active and segment not found.');
             }
         } else if ($type === 'episode') { // Assuming Episode model passed
+             // For episodes, maintain a similar check if isRunning is applicable.
              if (!$this->hlsService->isRunning('episode', $modelId) && !file_exists($fullStoragePath)) {
                 Log::error("HLS Segment Logic: FFmpeg process for episode {$modelId} ('{$modelName}') not running AND segment {$segmentName} not found. Aborting with 404.");
                 abort(404, 'Episode stream not active and segment not found.');
@@ -256,16 +257,20 @@ class HlsStreamController extends Controller
         }
 
         if (!file_exists($fullStoragePath)) {
+            // This can happen if client requests a segment that's already been deleted by HLS cleanup,
+            // or if FFmpeg is slow to produce segments, or if the stream just ended/failed.
             Log::warning("HLS Segment Logic: Segment {$segmentName} for {$type} ID {$modelId} ('{$modelName}') not found at path {$fullStoragePath}. Client may be requesting too quickly, or stream just ended/failed, or segment was cleaned up.");
             return response('Segment not found', 404, ['Content-Type' => 'video/MP2T', 'Cache-Control' => 'no-cache']);
         }
 
-        Log::debug("HLS Segment Logic: Serving segment {$segmentName} for {$type} ID {$modelId} ('{$modelName}').");
+        // Track activity (optional, but kept from original logic for now)
+        // Consider if this is too noisy or performance-intensive for every segment.
         Redis::transaction(function () use ($type, $modelId) {
             Redis::set("hls:{$type}_last_seen:{$modelId}", now()->timestamp);
             Redis::sadd("hls:active_{$type}_ids", $modelId);
         });
 
+        Log::debug("HLS Segment Logic: Serving segment {$segmentName} for {$type} ID {$modelId} ('{$modelName}') via X-Accel-Redirect: {$nginxRedirectPath}");
         return response('', 200, [
             'Content-Type'     => 'video/MP2T',
             'X-Accel-Redirect' => $nginxRedirectPath,

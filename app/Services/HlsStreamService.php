@@ -13,275 +13,273 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Redis;
 use Illuminate\Support\Facades\Storage;
 use Symfony\Component\Process\Process as SymfonyProcess;
+use App\Jobs\MonitorStreamHealthJob;
+use App\Models\ChannelStreamProvider;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Contracts\Cache\LockTimeoutException;
 
 class HlsStreamService
 {
     use TracksActiveStreams;
 
-use App\Jobs\MonitorStreamHealthJob;
-use App\Models\ChannelStreamProvider;
-use Illuminate\Support\Facades\Http;
-
     /**
      * Start an HLS stream for the given channel by selecting an appropriate provider.
-     *
-     * @param Channel $channel The Channel model instance
-     * @return Channel|null The updated channel with stream provider info, or null if failed.
      */
     public function startStream(Channel $channel): ?Channel
     {
         $originalChannelTitle = strip_tags($channel->title_custom ?? $channel->title);
-        Log::info("HlsStreamService: Start stream requested for channel {$channel->id} ('{$originalChannelTitle}'). Current status: {$channel->stream_status}, current provider: {$channel->current_stream_provider_id}.");
+        $lockKey = "stream-start-{$channel->id}";
+        $lock = Cache::lock($lockKey, 60); // Lock for 60 seconds
 
-        if ($this->isRunning('channel', $channel->id)) {
-            $currentProvider = $channel->currentStreamProvider;
-            $providerInfo = $currentProvider ? "provider {$currentProvider->id} ('{$currentProvider->provider_name}', URL: {$currentProvider->stream_url})" : "an unknown provider";
-            Log::info("HlsStreamService: Stream for channel {$channel->id} is already running with {$providerInfo}. Ensuring monitor job is active and returning channel.");
-            if ($currentProvider) {
-                 MonitorStreamHealthJob::dispatch($channel->id, $currentProvider->id)->onQueue('stream-monitoring');
+        Log::info("HlsStreamService: Start stream requested for channel {$channel->id} ('{$originalChannelTitle}'). Current status: {$channel->stream_status}, current provider: {$channel->current_stream_provider_id}. Attempting to acquire lock: {$lockKey}");
+
+        try {
+            if (!$lock->block(10)) { // Wait up to 10 seconds to acquire the lock
+                Log::warning("HlsStreamService: Could not acquire lock '{$lockKey}' for channel {$channel->id}. Another start/switch operation may be in progress.");
+                return null; // Or throw an exception
             }
-            return $channel;
-        }
+            Log::debug("HlsStreamService: Lock '{$lockKey}' acquired for channel {$channel->id}.");
 
-        Log::info("HlsStreamService: No active FFmpeg process for channel {$channel->id}. Proceeding to stop/cleanup and select provider.");
-        // Clean up any existing process that might have been orphaned or if state is inconsistent.
-        $this->stopStream('channel', $channel->id, false);
+            // Re-fetch channel state within lock to ensure latest data
+            $channel->refresh();
 
-        $streamProviders = $channel->streamProviders()->where('is_active', true)->orderBy('priority')->get();
+            if ($this->isRunning('channel', $channel->id)) {
+                $currentProvider = $channel->currentStreamProvider;
+                $providerInfo = $currentProvider ? "provider {$currentProvider->id} ('{$currentProvider->provider_name}', URL: {$currentProvider->stream_url})" : "an unknown provider";
+                Log::info("HlsStreamService: Stream for channel {$channel->id} ('{$originalChannelTitle}') is already running with {$providerInfo}. Ensuring monitor job is active and returning channel.");
+                if ($currentProvider) {
+                    MonitorStreamHealthJob::dispatch($channel->id, $currentProvider->id)->onQueue('stream-monitoring');
+                }
+                return $channel;
+            }
 
-        if ($streamProviders->isEmpty()) {
-            Log::error("HlsStreamService: No active stream providers available for channel {$channel->id} ('{$originalChannelTitle}'). Cannot start stream.");
+            Log::info("HlsStreamService: No active FFmpeg process for channel {$channel->id} ('{$originalChannelTitle}'). Proceeding to stop/cleanup and select provider.");
+            $this->stopStream('channel', $channel->id, false); // Cleanup, don't decrement regular count
+
+            $streamProviders = $channel->streamProviders()->where('is_active', true)->orderBy('priority')->get();
+
+            if ($streamProviders->isEmpty()) {
+                Log::error("HlsStreamService: No active stream providers available for channel {$channel->id} ('{$originalChannelTitle}'). Cannot start stream.");
+                $channel->stream_status = 'failed';
+                $channel->current_stream_provider_id = null;
+                $channel->save();
+                return null;
+            }
+
+            $streamSettings = ProxyService::getStreamSettings();
+            $ffprobeTimeout = $streamSettings['ffmpeg_ffprobe_timeout'] ?? 5;
+            $playlist = $channel->playlist;
+
+            Redis::set("hls:channel_last_seen:{$channel->id}", now()->timestamp);
+            Redis::sadd("hls:active_channel_ids", $channel->id);
+
+            foreach ($streamProviders as $provider) {
+                $providerInfo = "provider {$provider->id} ('{$provider->provider_name}', URL: {$provider->stream_url})";
+                Log::info("HlsStreamService: Attempting {$providerInfo} for channel {$channel->id} ('{$originalChannelTitle}')");
+
+                $badSourceCacheKey = ProxyService::BAD_SOURCE_CACHE_PREFIX . 'provider:' . $provider->id;
+                if (Redis::exists($badSourceCacheKey)) {
+                    Log::info("HlsStreamService: Skipping {$providerInfo} for channel {$channel->id} as it was recently marked as bad. Reason: " . (Redis::get($badSourceCacheKey) ?: 'N/A'));
+                    continue;
+                }
+
+                if ($playlist) {
+                    $activeStreams = $this->incrementActiveStreams($playlist->id);
+                    if ($this->wouldExceedStreamLimit($playlist->id, $playlist->available_streams, $activeStreams)) {
+                        $this->decrementActiveStreams($playlist->id);
+                        Log::warning("HlsStreamService: Max streams reached for playlist {$playlist->name} ({$playlist->id}). Skipping {$providerInfo} for channel {$channel->id}.");
+                        continue;
+                    }
+                }
+
+                try {
+                    Log::debug("HlsStreamService: Validating {$providerInfo} for channel {$channel->id} - Step 1: HTTP HEAD request.");
+                    $validationResponse = Http::timeout(3)->head($provider->stream_url);
+                    if (!$validationResponse->successful()) {
+                        Log::warning("HlsStreamService: Provider {$provider->id} (URL: {$provider->stream_url}) for channel {$channel->id} failed HEAD validation. Status: {$validationResponse->status()}");
+                        throw new SourceNotResponding("HEAD request failed with status " . $validationResponse->status());
+                    }
+                    Log::debug("HlsStreamService: Provider {$provider->id} for channel {$channel->id} - Step 1: HTTP HEAD OK.");
+
+                    Log::debug("HlsStreamService: Validating {$providerInfo} for channel {$channel->id} - Step 2: FFprobe pre-check.");
+                    $this->runPreCheck('channel', $channel->id, $provider->stream_url, $playlist?->user_agent, $originalChannelTitle, $ffprobeTimeout);
+                    Log::debug("HlsStreamService: Provider {$provider->id} for channel {$channel->id} - Step 2: FFprobe OK.");
+
+                    Log::info("HlsStreamService: Starting FFmpeg for {$providerInfo} on channel {$channel->id} ('{$originalChannelTitle}').");
+                    $this->startStreamWithSpeedCheck(
+                        type: 'channel',
+                        model: $channel,
+                        streamUrl: $provider->stream_url,
+                        title: $originalChannelTitle,
+                        playlistId: $playlist?->id,
+                        userAgent: $playlist?->user_agent
+                    );
+
+                    $channel->current_stream_provider_id = $provider->id;
+                    $channel->stream_status = 'playing';
+                    $channel->save();
+                    Log::info("HlsStreamService: Channel {$channel->id} state updated: current_stream_provider_id={$provider->id}, stream_status='playing'.");
+
+
+                    $provider->status = 'online';
+                    $provider->last_checked_at = now();
+                    $provider->save();
+                    Log::info("HlsStreamService: Provider {$provider->id} status updated to 'online'.");
+
+                    MonitorStreamHealthJob::dispatch($channel->id, $provider->id)->onQueue('stream-monitoring');
+                    Log::info("HlsStreamService: Successfully started stream for channel {$channel->id} ('{$originalChannelTitle}') with {$providerInfo}.");
+                    return $channel;
+
+                } catch (SourceNotResponding $e) {
+                    if ($playlist) $this->decrementActiveStreams($playlist->id);
+                    Log::warning("HlsStreamService: SourceNotResponding for {$providerInfo} on channel {$channel->id}. Error: {$e->getMessage()}");
+                    Redis::setex($badSourceCacheKey, ProxyService::BAD_SOURCE_CACHE_SECONDS, $e->getMessage());
+                    $provider->status = 'offline';
+                    $provider->last_checked_at = now();
+                    $provider->save();
+                    Log::info("HlsStreamService: Marked {$providerInfo} as 'offline' for channel {$channel->id}.");
+                    // Continue to next provider
+                } catch (Exception $e) {
+                    if ($playlist) $this->decrementActiveStreams($playlist->id);
+                    Log::error("HlsStreamService: Exception while trying {$providerInfo} for channel {$channel->id}. Error: {$e->getMessage()}", [
+                        'exception' => $e->getTraceAsString(), // Log full trace for better debugging
+                    ]);
+                    Redis::setex($badSourceCacheKey, ProxyService::BAD_SOURCE_CACHE_SECONDS, $e->getMessage());
+                    $provider->status = 'offline';
+                    $provider->last_checked_at = now();
+                    $provider->save();
+                    Log::info("HlsStreamService: Marked {$providerInfo} as 'offline' for channel {$channel->id} due to generic exception.");
+                    // Continue to next provider
+                }
+            }
+
+            Log::error("HlsStreamService: All providers failed for channel {$channel->id} ('{$originalChannelTitle}'). Setting channel status to 'failed'.");
             $channel->stream_status = 'failed';
             $channel->current_stream_provider_id = null;
             $channel->save();
             return null;
+
+        } catch (LockTimeoutException $e) {
+            Log::warning("HlsStreamService: LockTimeoutException for channel {$channel->id} in startStream. Could not acquire lock '{$lockKey}'.", ['exception' => $e->getMessage()]);
+            return null; // Indicate failure to acquire lock
+        } finally {
+            optional($lock)->release();
+            Log::debug("HlsStreamService: Lock '{$lockKey}' released for channel {$channel->id}.");
         }
+    }
 
-        // Get stream settings, including the ffprobe timeout
-        $streamSettings = ProxyService::getStreamSettings();
-        $ffprobeTimeout = $streamSettings['ffmpeg_ffprobe_timeout'] ?? 5;
-        $playlist = $channel->playlist; // Assuming channel always has a playlist relationship
+    public function switchStreamProvider(Channel $channel, ChannelStreamProvider $newProvider): bool
+    {
+        $originalChannelTitle = strip_tags($channel->title_custom ?? $channel->title);
+        $currentActiveProviderId = $channel->current_stream_provider_id; // Get ID before it's potentially changed
+        $newProviderInfo = "provider {$newProvider->id} ('{$newProvider->provider_name}', URL: {$newProvider->stream_url})";
+        $lockKey = "stream-switch-{$channel->id}";
+        $lock = Cache::lock($lockKey, 75); // Lock for 75 seconds (longer for stop + start)
 
-        // Record timestamp in Redis for the original model (never expires until we prune)
-        Redis::set("hls:channel_last_seen:{$channel->id}", now()->timestamp);
-        // Add to active IDs set for the original model
-        Redis::sadd("hls:active_channel_ids", $channel->id);
+        Log::info("HlsStreamService: Attempting to SWITCH channel {$channel->id} ('{$originalChannelTitle}') from provider {$currentActiveProviderId} to {$newProviderInfo}. Attempting to acquire lock: {$lockKey}");
 
-
-        foreach ($streamProviders as $provider) {
-            $providerInfo = "provider {$provider->id} ('{$provider->provider_name}', URL: {$provider->stream_url}) for channel {$channel->id}";
-            Log::channel('ffmpeg')->info("HlsStreamService: Attempting {$providerInfo}");
-
-            // The bad source cache key should be provider-specific
-            $badSourceCacheKey = ProxyService::BAD_SOURCE_CACHE_PREFIX . 'provider:' . $provider->id;
-
-            if (Redis::exists($badSourceCacheKey)) {
-                Log::info("HlsStreamService: Skipping {$providerInfo} as it was recently marked as bad. Reason: " . (Redis::get($badSourceCacheKey) ?: 'N/A'));
-                continue;
+        try {
+            if (!$lock->block(15)) { // Wait up to 15 seconds
+                Log::warning("HlsStreamService (switch): Could not acquire lock '{$lockKey}' for channel {$channel->id}. Another switch/start operation may be in progress.");
+                return false;
             }
+            Log::debug("HlsStreamService (switch): Lock '{$lockKey}' acquired for channel {$channel->id}.");
 
-            // Playlist can be null if channel is not associated with one.
-            // Handle active stream limits if playlist context exists
-            if ($playlist) {
-                $activeStreams = $this->incrementActiveStreams($playlist->id);
-                if ($this->wouldExceedStreamLimit($playlist->id, $playlist->available_streams, $activeStreams)) {
-                    $this->decrementActiveStreams($playlist->id);
-                    Log::warning("HlsStreamService: Max streams reached for playlist {$playlist->name} ({$playlist->id}). Skipping {$providerInfo}.");
-                    continue; // Try next provider if this one would exceed limit
-                }
+            // Re-fetch channel to ensure current_stream_provider_id is fresh before stopping
+            $channel->refresh();
+            $currentActiveProviderId = $channel->current_stream_provider_id; // Update after refresh
+            Log::info("HlsStreamService (switch): Stopping current stream for channel {$channel->id} (was provider {$currentActiveProviderId}).");
+            $this->stopStream('channel', $channel->id, true);
+
+            $channel->stream_status = 'switching';
+            $channel->current_stream_provider_id = $newProvider->id;
+            $channel->save();
+            Log::info("HlsStreamService (switch): Channel {$channel->id} status set to 'switching', current_stream_provider_id set to {$newProvider->id}.");
+
+            $streamSettings = ProxyService::getStreamSettings();
+            $ffprobeTimeout = $streamSettings['ffmpeg_ffprobe_timeout'] ?? 5;
+            $playlist = $channel->playlist;
+
+            $badSourceCacheKey = ProxyService::BAD_SOURCE_CACHE_PREFIX . 'provider:' . $newProvider->id;
+            if (Redis::exists($badSourceCacheKey)) {
+                Log::info("HlsStreamService (switch): Skipping {$newProviderInfo} for channel {$channel->id} as it was recently marked as bad (cache hit).");
+                $newProvider->status = 'offline'; // Ensure it's marked
+                $newProvider->last_checked_at = now();
+                $newProvider->save();
+                // Revert channel status if this new provider is immediately skipped
+                // $channel->stream_status = 'failed'; // Or previous status? This is complex. Let failover job handle.
+                // $channel->current_stream_provider_id = $currentActiveProviderId; // Revert to old
+                // $channel->save();
+                return false;
             }
 
             try {
-                Log::debug("HlsStreamService: Validating provider ID {$provider->id} for channel {$channel->id} - Step 1: HTTP HEAD request to {$provider->stream_url}");
-                $validationResponse = Http::timeout(3)->head($provider->stream_url);
+                Log::debug("HlsStreamService (switch): Validating new {$newProviderInfo} for channel {$channel->id} ('{$originalChannelTitle}') - Step 1: HTTP HEAD.");
+                $validationResponse = Http::timeout(3)->head($newProvider->stream_url);
                 if (!$validationResponse->successful()) {
-                    Log::warning("HlsStreamService: Provider {$provider->id} (URL: {$provider->stream_url}) for channel {$channel->id} failed HEAD validation. Status: {$validationResponse->status()}");
+                    Log::warning("HlsStreamService (switch): New {$newProviderInfo} for channel {$channel->id} ('{$originalChannelTitle}') failed HEAD validation. Status: {$validationResponse->status()}");
                     throw new SourceNotResponding("HEAD request failed with status " . $validationResponse->status());
                 }
-                Log::debug("HlsStreamService: Provider {$provider->id} for channel {$channel->id} - Step 1: HTTP HEAD OK.");
+                Log::debug("HlsStreamService (switch): New {$newProviderInfo} for channel {$channel->id} ('{$originalChannelTitle}') - Step 1: HTTP HEAD OK.");
 
-                Log::debug("HlsStreamService: Validating provider ID {$provider->id} for channel {$channel->id} - Step 2: FFprobe pre-check.");
-                $this->runPreCheck('channel', $channel->id, $provider->stream_url, $playlist?->user_agent, $originalChannelTitle, $ffprobeTimeout);
-                Log::debug("HlsStreamService: Provider {$provider->id} for channel {$channel->id} - Step 2: FFprobe OK.");
+                Log::debug("HlsStreamService (switch): Validating new {$newProviderInfo} for channel {$channel->id} ('{$originalChannelTitle}') - Step 2: FFprobe pre-check.");
+                $this->runPreCheck('channel', $channel->id, $newProvider->stream_url, $playlist?->user_agent, $originalChannelTitle, $ffprobeTimeout);
+                Log::debug("HlsStreamService (switch): New {$newProviderInfo} for channel {$channel->id} ('{$originalChannelTitle}') - Step 2: FFprobe OK.");
 
-                Log::debug("HlsStreamService: Starting FFmpeg for provider ID {$provider->id} on channel {$channel->id}.");
+                Log::info("HlsStreamService (switch): Starting FFmpeg for new {$newProviderInfo} on channel {$channel->id} ('{$originalChannelTitle}').");
                 $this->startStreamWithSpeedCheck(
                     type: 'channel',
                     model: $channel,
-                    streamUrl: $provider->stream_url,
+                    streamUrl: $newProvider->stream_url,
                     title: $originalChannelTitle,
                     playlistId: $playlist?->id,
                     userAgent: $playlist?->user_agent
                 );
 
-                $channel->current_stream_provider_id = $provider->id;
+                $channel->current_stream_provider_id = $newProvider->id;
                 $channel->stream_status = 'playing';
                 $channel->save();
+                Log::info("HlsStreamService (switch): Channel {$channel->id} ('{$originalChannelTitle}') status updated to 'playing' with provider {$newProvider->id}.");
 
-                $provider->status = 'online';
-                $provider->last_checked_at = now();
-                $provider->save();
+                $newProvider->status = 'online';
+                $newProvider->last_checked_at = now();
+                $newProvider->save();
+                Log::info("HlsStreamService (switch): Provider {$newProvider->id} status updated to 'online'.");
 
-                MonitorStreamHealthJob::dispatch($channel->id, $provider->id)->onQueue('stream-monitoring');
-                Log::info("HlsStreamService: Successfully started stream for channel {$channel->id} with {$providerInfo}.");
-                return $channel;
+                MonitorStreamHealthJob::dispatch($channel->id, $newProvider->id)->onQueue('stream-monitoring');
+                Log::info("HlsStreamService: Successfully SWITCHED channel {$channel->id} ('{$originalChannelTitle}') to {$newProviderInfo}.");
+                return true;
 
             } catch (SourceNotResponding $e) {
-                if ($playlist) $this->decrementActiveStreams($playlist->id);
-                Log::warning("HlsStreamService: SourceNotResponding for {$providerInfo} on channel {$channel->id}. Error: {$e->getMessage()}");
+                Log::warning("HlsStreamService (switch): SourceNotResponding for new {$newProviderInfo} on channel {$channel->id} ('{$originalChannelTitle}'). Error: {$e->getMessage()}");
                 Redis::setex($badSourceCacheKey, ProxyService::BAD_SOURCE_CACHE_SECONDS, $e->getMessage());
-                $provider->status = 'offline';
-                $provider->last_checked_at = now();
-                $provider->save();
-                Log::info("HlsStreamService: Marked {$providerInfo} as offline for channel {$channel->id}.");
-                continue;
+                $newProvider->status = 'offline';
+                $newProvider->last_checked_at = now();
+                $newProvider->save();
+                Log::info("HlsStreamService (switch): Marked new {$newProviderInfo} as 'offline' for channel {$channel->id}.");
+                // Channel state remains 'switching' with newProvider->id, InitiateFailoverJob will try next or mark 'failed'.
+                return false;
             } catch (Exception $e) {
-                if ($playlist) $this->decrementActiveStreams($playlist->id);
-                Log::error("HlsStreamService: Generic Exception while trying {$providerInfo} for channel {$channel->id}. Error: {$e->getMessage()}", ['exception' => $e]);
+                Log::error("HlsStreamService (switch): Generic Exception for new {$newProviderInfo} on channel {$channel->id} ('{$originalChannelTitle}'). Error: {$e->getMessage()}", ['exception' => $e->getTraceAsString()]);
                 Redis::setex($badSourceCacheKey, ProxyService::BAD_SOURCE_CACHE_SECONDS, $e->getMessage());
-                $provider->status = 'offline';
-                $provider->last_checked_at = now();
-                $provider->save();
-                Log::info("HlsStreamService: Marked {$providerInfo} as offline for channel {$channel->id} due to generic exception.");
-                continue;
+                $newProvider->status = 'offline';
+                $newProvider->last_checked_at = now();
+                $newProvider->save();
+                Log::info("HlsStreamService (switch): Marked new {$newProviderInfo} as 'offline' for channel {$channel->id} ('{$originalChannelTitle}') due to generic exception.");
+                return false;
             }
-        }
-
-        Log::error("HlsStreamService: All providers failed for channel {$channel->id} ('{$originalChannelTitle}'). Setting channel status to 'failed'.");
-        $channel->stream_status = 'failed';
-        $channel->current_stream_provider_id = null;
-        $channel->save();
-        return null;
-    }
-
-
-    public function switchStreamProvider(Channel $channel, ChannelStreamProvider $newProvider): bool
-    {
-        $originalChannelTitle = strip_tags($channel->title_custom ?? $channel->title);
-        $currentProviderId = $channel->current_stream_provider_id;
-        $newProviderInfo = "provider {$newProvider->id} ('{$newProvider->provider_name}', URL: {$newProvider->stream_url})";
-
-        Log::info("HlsStreamService: Attempting to SWITCH channel {$channel->id} ('{$originalChannelTitle}') from provider {$currentProviderId} to {$newProviderInfo}");
-
-        $this->stopStream('channel', $channel->id, true); // Stop current stream, decrement count
-
-        $channel->stream_status = 'switching';
-        // Temporarily assign new provider ID for context, even if it fails later
-        $channel->current_stream_provider_id = $newProvider->id;
-        $channel->save();
-
-        $streamSettings = ProxyService::getStreamSettings();
-        $ffprobeTimeout = $streamSettings['ffmpeg_ffprobe_timeout'] ?? 5;
-        $playlist = $channel->playlist;
-
-
-        // Similar logic to startStream for the specific new provider
-        // The bad source cache key should be provider-specific
-        $badSourceCacheKey = ProxyService::BAD_SOURCE_CACHE_PREFIX . 'provider:' . $newProvider->id;
-        if (Redis::exists($badSourceCacheKey)) {
-            Log::info("HlsStreamService (switch): Skipping {$newProviderInfo} for channel {$channel->id} as it was recently marked as bad.");
-            $newProvider->status = 'offline';
-            $newProvider->last_checked_at = now();
-            $newProvider->save();
-            // Revert to old provider ID if new one is immediately skipped, or let failover job handle it.
-            // For now, status is 'switching', failover job will reassess.
-            // $channel->current_stream_provider_id = $currentProviderId; // Revert
-            // $channel->save();
-            return false;
-        }
-
-        // This is tricky: we stopped one, now trying to start another.
-        // The stopStream would have decremented. startStreamWithSpeedCheck/runPrecheck might increment.
-        // Let's assume playlist is mainly for limiting *concurrent distinct channels*
-        if ($playlist) {
-             // $activeStreams = $this->incrementActiveStreams($playlist->id); // This might be needed if stopStream isn't aware of the immediate restart
-             // if ($this->wouldExceedStreamLimit($playlist->id, $playlist->available_streams, $activeStreams)) {
-             //     $this->decrementActiveStreams($playlist->id);
-             //     Log::channel('ffmpeg')->debug("HlsStreamService (switch): Max streams reached for playlist {$playlist->name}. Cannot switch to {$newProviderInfo}.");
-             //     // This case is problematic, means we stopped a stream and can't start another.
-             //     // The channel might be left in a 'failed' or 'switching' state with no provider.
-             //     $channel->stream_status = 'failed'; // Or some other state
-             //     $channel->save();
-             //     return false;
-             // }
-             // For now, assume stream limits are handled per channel activation rather than per provider switch.
-        }
-
-
-        try {
-            Log::debug("HlsStreamService (switch): Validating new {$newProviderInfo} for channel {$channel->id} - Step 1: HTTP HEAD.");
-            $validationResponse = Http::timeout(3)->head($newProvider->stream_url);
-            if (!$validationResponse->successful()) {
-                Log::warning("HlsStreamService (switch): New {$newProviderInfo} for channel {$channel->id} failed HEAD validation. Status: {$validationResponse->status()}");
-                throw new SourceNotResponding("HEAD request failed with status " . $validationResponse->status());
-            }
-            Log::debug("HlsStreamService (switch): New {$newProviderInfo} for channel {$channel->id} - Step 1: HTTP HEAD OK.");
-
-            Log::debug("HlsStreamService (switch): Validating new {$newProviderInfo} for channel {$channel->id} - Step 2: FFprobe pre-check.");
-            $this->runPreCheck('channel', $channel->id, $newProvider->stream_url, $playlist?->user_agent, $originalChannelTitle, $ffprobeTimeout);
-            Log::debug("HlsStreamService (switch): New {$newProviderInfo} for channel {$channel->id} - Step 2: FFprobe OK.");
-
-            Log::debug("HlsStreamService (switch): Starting FFmpeg for new {$newProviderInfo} on channel {$channel->id}.");
-            $this->startStreamWithSpeedCheck(
-                type: 'channel',
-                model: $channel,
-                streamUrl: $newProvider->stream_url,
-                title: $originalChannelTitle,
-                playlistId: $playlist?->id,
-                userAgent: $playlist?->user_agent
-            );
-
-            // Successfully started with new provider
-            $channel->current_stream_provider_id = $newProvider->id; // Already set, but confirm
-            $channel->stream_status = 'playing';
-            $channel->save();
-
-            $newProvider->status = 'online';
-            $newProvider->last_checked_at = now();
-            $newProvider->save();
-
-            MonitorStreamHealthJob::dispatch($channel->id, $newProvider->id)->onQueue('stream-monitoring');
-            Log::info("HlsStreamService: Successfully SWITCHED channel {$channel->id} ('{$originalChannelTitle}') to {$newProviderInfo}.");
-            return true;
-
-        } catch (SourceNotResponding $e) {
-            Log::warning("HlsStreamService (switch): SourceNotResponding for new {$newProviderInfo} on channel {$channel->id}. Error: {$e->getMessage()}");
-            Redis::setex($badSourceCacheKey, ProxyService::BAD_SOURCE_CACHE_SECONDS, $e->getMessage());
-            $newProvider->status = 'offline';
-            $newProvider->last_checked_at = now();
-            $newProvider->save();
-            Log::info("HlsStreamService (switch): Marked new {$newProviderInfo} as offline for channel {$channel->id}.");
-            // $channel->stream_status = 'failed'; // Let InitiateFailoverJob decide next state
-            // $channel->current_stream_provider_id = $currentProviderId; // Revert to old provider ID if switch failed
-            // $channel->save();
-            return false;
-        } catch (Exception $e) {
-            Log::error("HlsStreamService (switch): Generic Exception for new {$newProviderInfo} on channel {$channel->id}. Error: {$e->getMessage()}", ['exception' => $e]);
-            Redis::setex($badSourceCacheKey, ProxyService::BAD_SOURCE_CACHE_SECONDS, $e->getMessage());
-            $newProvider->status = 'offline';
-            $newProvider->last_checked_at = now();
-            $newProvider->save();
-            Log::info("HlsStreamService (switch): Marked new {$newProviderInfo} as offline for channel {$channel->id} due to generic exception.");
-            // $channel->stream_status = 'failed'; // Let InitiateFailoverJob decide next state
-            // $channel->current_stream_provider_id = $currentProviderId; // Revert
-            // $channel->save();
-            return false;
+        } catch (LockTimeoutException $e) {
+            Log::warning("HlsStreamService (switch): LockTimeoutException for channel {$channel->id}. Could not acquire lock '{$lockKey}'.", ['exception' => $e->getMessage()]);
+            return false; // Indicate failure to acquire lock
+        } finally {
+            optional($lock)->release();
+            Log::debug("HlsStreamService (switch): Lock '{$lockKey}' released for channel {$channel->id}.");
         }
     }
 
 
     /**
      * Start a stream and monitor for slow speed.
-     *
-     * @param string $type
-     * @param Channel|Episode $model
-     * @param string $streamUrl
-     * @param string $title
-     * @param int|null $playlistId // PlaylistId can be null
-     * @param string|null $userAgent
-     *
-     * @return int The FFmpeg process ID
-     * @throws Exception If the stream fails or speed drops below the threshold
      */
     private function startStreamWithSpeedCheck(
         string $type,
@@ -292,10 +290,10 @@ use Illuminate\Support\Facades\Http;
         string|null $userAgent
     ): int {
         $channelIdForLog = ($model instanceof Channel) ? $model->id : 'N/A (episode)';
-        Log::debug("HlsStreamService: Preparing to start FFmpeg for {$type} ID {$model->id} (Channel context ID: {$channelIdForLog}), Title: {$title}, URL: {$streamUrl}");
+        Log::debug("HlsStreamService: Preparing to start FFmpeg for {$type} ID {$model->id} (Channel Context ID: {$channelIdForLog}), Title: '{$title}', URL: {$streamUrl}");
 
         $cmd = $this->buildCmd($type, $model->id, $userAgent, $streamUrl);
-        Log::info("HlsStreamService: FFmpeg command for {$type} ID {$model->id}: {$cmd}");
+        Log::info("HlsStreamService: FFmpeg command for {$type} ID {$model->id}: " . escapeshellcmd($cmd) ); # Log the escaped command
         $descriptors = [
             0 => ['pipe', 'r'],
             1 => ['pipe', 'w'],
@@ -310,7 +308,7 @@ use Illuminate\Support\Facades\Http;
         $process = proc_open($cmd, $descriptors, $pipes, $workingDir);
 
         if (!is_resource($process)) {
-            Log::critical("HlsStreamService: Failed to launch FFmpeg process for {$type} ID {$model->id} ('{$title}'). Command: {$cmd}");
+            Log::critical("HlsStreamService: Failed to launch FFmpeg process for {$type} ID {$model->id} ('{$title}'). Command: " . escapeshellcmd($cmd) . " Please check FFmpeg path and permissions.");
             throw new Exception("Failed to launch FFmpeg for {$title}");
         }
         Log::debug("HlsStreamService: FFmpeg process launched for {$type} ID {$model->id} ('{$title}').");
@@ -318,43 +316,50 @@ use Illuminate\Support\Facades\Http;
         fclose($pipes[0]);
         fclose($pipes[1]);
 
-        // Make stderr non-blocking
         stream_set_blocking($pipes[2], false);
 
-        // Spawn a little "reader" that pulls from stderr and logs
         $logger = Log::channel('ffmpeg');
         $stderr = $pipes[2];
 
-        // Get the PID and cache it
         $cacheKey = "hls:pid:{$type}:{$model->id}";
 
-        // Register shutdown function to ensure the pipe is drained
         register_shutdown_function(function () use (
             $stderr,
             $process,
-            $logger
+            $logger,
+            $type,
+            $model,
+            $title // For logging context
         ) {
+            $errorOutput = '';
             while (!feof($stderr)) {
                 $line = fgets($stderr);
                 if ($line !== false) {
-                    $logger->error(trim($line));
+                    $errorOutput .= $line;
                 }
             }
+            if (!empty(trim($errorOutput))) {
+                 $logger->error("HlsStreamService: FFmpeg stderr output for {$type} ID {$model->id} ('{$title}'): " . trim($errorOutput));
+            }
             fclose($stderr);
+            $status = proc_get_status($process);
             proc_close($process);
+            if ($status['exitcode'] !== 0 && $status['exitcode'] !== -1 && $status['exitcode'] !== 255) { // 255 can be from SIGTERM
+                 $logger->error("HlsStreamService: FFmpeg process for {$type} ID {$model->id} ('{$title}') exited unexpectedly with code {$status['exitcode']}. Stderr: " . trim($errorOutput));
+            } elseif ($status['signaled'] && $status['termsig'] !== SIGTERM && $status['termsig'] !== SIGKILL) {
+                 $logger->error("HlsStreamService: FFmpeg process for {$type} ID {$model->id} ('{$title}') was terminated by signal {$status['termsig']}. Stderr: " . trim($errorOutput));
+            }
         });
 
-        // Cache the actual FFmpeg PID
         $status = proc_get_status($process);
         $pid = $status['pid'];
         Cache::forever($cacheKey, $pid);
-        Log::info("HlsStreamService: FFmpeg process started for {$type} ID {$model->id} ('{$title}') with PID {$pid}. Cached with key {$cacheKey}.");
+        Log::info("HlsStreamService: FFmpeg process successfully started for {$type} ID {$model->id} ('{$title}') with PID {$pid}. Cached with key {$cacheKey}.");
 
-        // Store the process start time
         $startTimeCacheKey = "hls:streaminfo:starttime:{$type}:{$model->id}";
         $currentTime = now()->timestamp;
         Redis::setex($startTimeCacheKey, 604800, $currentTime);
-        Log::debug("HlsStreamService: Stored FFmpeg process start time for {$type} ID {$model->id} at {$currentTime}. Key: {$startTimeCacheKey}");
+        Log::debug("HlsStreamService: Stored FFmpeg process start time for {$type} ID {$model->id} at {$currentTime}. Key: {$startTimeCacheKey}.");
 
         Redis::set("hls:{$type}_last_seen:{$model->id}", now()->timestamp);
         Redis::sadd("hls:active_{$type}_ids", $model->id);
@@ -364,24 +369,15 @@ use Illuminate\Support\Facades\Http;
 
     /**
      * Run a pre-check using ffprobe to validate the stream.
-     *
-     * @param string $modelType // 'channel' or 'episode'
-     * @param int|string $modelId    // ID of the channel or episode
-     * @param string $streamUrl
-     * @param string|null $userAgent
-     * @param string $title
-     * @param int $ffprobeTimeout The timeout for the ffprobe process in seconds
-     *
-     * @throws Exception If the pre-check fails
      */
     private function runPreCheck(string $modelType, $modelId, $streamUrl, $userAgent, $title, int $ffprobeTimeout)
     {
         $ffprobePath = config('proxy.ffprobe_path', 'ffprobe');
-        $escapedUserAgent = $userAgent ? escapeshellarg($userAgent) : "''"; // Handle null user agent
+        $escapedUserAgent = $userAgent ? escapeshellarg($userAgent) : "''";
         $cmd = "$ffprobePath -v quiet -print_format json -show_streams -show_format -user_agent {$escapedUserAgent} " . escapeshellarg($streamUrl);
 
-        Log::info("[PRE-CHECK] Executing ffprobe for {$modelType} ID {$modelId} ('{$title}'), URL: {$streamUrl}, Timeout: {$ffprobeTimeout}s.");
-        Log::debug("[PRE-CHECK] FFprobe command for ('{$title}'): {$cmd}");
+        Log::info("HlsStreamService [PRE-CHECK]: Executing ffprobe for {$modelType} ID {$modelId} ('{$title}'), URL: {$streamUrl}, Timeout: {$ffprobeTimeout}s.");
+        Log::debug("HlsStreamService [PRE-CHECK]: FFprobe command for ('{$title}'): {$cmd}");
 
         $precheckProcess = SymfonyProcess::fromShellCommandline($cmd);
         $precheckProcess->setTimeout($ffprobeTimeout);
@@ -390,17 +386,17 @@ use Illuminate\Support\Facades\Http;
             $precheckProcess->run();
             if (!$precheckProcess->isSuccessful()) {
                 $errorOutput = $precheckProcess->getErrorOutput();
-                Log::error("[PRE-CHECK] ffprobe failed for {$modelType} ID {$modelId} ('{$title}'). Exit Code: {$precheckProcess->getExitCode()}. Error: {$errorOutput}");
-                throw new SourceNotResponding("ffprobe validation failed (Exit Code: {$precheckProcess->getExitCode()}). Output: {$errorOutput}");
+                Log::warning("HlsStreamService [PRE-CHECK]: ffprobe failed for {$modelType} ID {$modelId} ('{$title}'). Exit Code: {$precheckProcess->getExitCode()}. Error: " . trim($errorOutput));
+                throw new SourceNotResponding("ffprobe validation failed (Exit Code: {$precheckProcess->getExitCode()}). Output: " . trim($errorOutput));
             }
-            Log::info("[PRE-CHECK] ffprobe successful for {$modelType} ID {$modelId} ('{$title}').");
+            Log::info("HlsStreamService [PRE-CHECK]: ffprobe successful for {$modelType} ID {$modelId} ('{$title}').");
 
             $ffprobeJsonOutput = $precheckProcess->getOutput();
             $streamInfo = json_decode($ffprobeJsonOutput, true);
+            // ... (rest of ffprobe parsing logic remains the same)
             $extractedDetails = [];
 
             if (json_last_error() === JSON_ERROR_NONE && !empty($streamInfo)) {
-                // Format Section
                 if (isset($streamInfo['format'])) {
                     $format = $streamInfo['format'];
                     $extractedDetails['format'] = [
@@ -429,7 +425,7 @@ use Illuminate\Support\Facades\Http;
                                 'tags' => $stream['tags'] ?? [],
                             ];
                             $logResolution = ($stream['width'] ?? 'N/A') . 'x' . ($stream['height'] ?? 'N/A');
-                            Log::channel('ffmpeg')->debug(
+                            Log::debug( // Changed from Log::channel('ffmpeg') to Log::debug for consistency
                                 "[PRE-CHECK] Source [{$title}] video stream: " .
                                 "Codec: " . ($stream['codec_name'] ?? 'N/A') . ", " .
                                 "Format: " . ($stream['pix_fmt'] ?? 'N/A') . ", " .
@@ -456,25 +452,20 @@ use Illuminate\Support\Facades\Http;
                 if (!empty($extractedDetails)) {
                     $detailsCacheKey = "hls:streaminfo:details:{$modelType}:{$modelId}";
                     Redis::setex($detailsCacheKey, 86400, json_encode($extractedDetails));
-                    Log::debug("[PRE-CHECK] Cached detailed streaminfo for {$modelType} ID {$modelId}. Key: {$detailsCacheKey}");
+                    Log::debug("HlsStreamService [PRE-CHECK]: Cached detailed streaminfo for {$modelType} ID {$modelId}. Key: {$detailsCacheKey}");
                 }
             } else {
-                Log::warning("[PRE-CHECK] Could not decode ffprobe JSON output for {$modelType} ID {$modelId} ('{$title}'). JSON Error: " . json_last_error_msg() . ". Output: " . substr($ffprobeJsonOutput, 0, 500));
+                Log::warning("HlsStreamService [PRE-CHECK]: Could not decode ffprobe JSON output for {$modelType} ID {$modelId} ('{$title}'). JSON Error: " . json_last_error_msg() . ". Output: " . substr($ffprobeJsonOutput, 0, 500));
             }
-        } catch (Exception $e) { // Catches ProcessTimedOutException, ProcessFailedException etc. from Symfony Process
-            Log::error("[PRE-CHECK] Exception during ffprobe for {$modelType} ID {$modelId} ('{$title}'). Error: {$e->getMessage()}");
+
+        } catch (Exception $e) {
+            Log::error("HlsStreamService [PRE-CHECK]: Exception during ffprobe for {$modelType} ID {$modelId} ('{$title}'). Error: {$e->getMessage()}", ['exception' => $e]);
             throw new SourceNotResponding("ffprobe process exception: " . $e->getMessage());
         }
     }
 
     /**
      * Stop FFmpeg for the given HLS stream channel (if currently running).
-     *
-     * @param string $type Currently 'channel' or 'episode'
-     * @param string $id Channel or Episode ID
-     * @param bool $decrementCount Whether to decrement active stream count for the playlist.
-     *                             True for user/failover stops, false for cleanup/restart scenarios.
-     * @return bool True if a stream was running and stopped, false otherwise.
      */
     public function stopStream(string $type, string $id, bool $decrementCount = true): bool
     {
@@ -482,55 +473,57 @@ use Illuminate\Support\Facades\Http;
         $pid = Cache::get($cacheKey);
         $wasRunning = false;
         $logDetails = "type: {$type}, id: {$id}, decrementCount: " . ($decrementCount ? 'yes' : 'no');
+        $channelInfo = '';
 
         $model = null;
         if ($type === 'channel') {
             $model = Channel::find($id);
-            if ($model && $model->currentStreamProvider) {
-                $logDetails .= ", active_provider_id: {$model->current_stream_provider_id}";
+            if ($model) {
+                $channelInfo = "('".strip_tags($model->title_custom ?? $model->title)."')";
+                if ($model->currentStreamProvider) {
+                    $logDetails .= ", previously_active_provider_id: {$model->current_stream_provider_id} ('{$model->currentStreamProvider->provider_name}')";
+                }
             }
         } elseif ($type === 'episode') {
             $model = Episode::find($id);
+             if ($model) $channelInfo = "('".strip_tags($model->title)."')";
         }
-        Log::info("HlsStreamService: stopStream called for {$logDetails}");
+        Log::info("HlsStreamService: stopStream called for {$type} ID {$id} {$channelInfo}. Details: {$logDetails}.");
 
         if ($pid && posix_kill($pid, 0) && $this->isFfmpeg($pid)) {
-            Log::info("HlsStreamService: Attempting to stop active FFmpeg process PID {$pid} for {$type} {$id}.");
+            Log::info("HlsStreamService: Attempting to stop active FFmpeg process PID {$pid} for {$type} {$id} {$channelInfo}.");
             $wasRunning = true;
 
             posix_kill($pid, SIGTERM);
             $attempts = 0;
-            while ($attempts < 30 && posix_kill($pid, 0)) { // Check if process still exists
-                usleep(100000); // 100ms
+            while ($attempts < 30 && posix_kill($pid, 0)) {
+                usleep(100000);
                 $attempts++;
             }
 
             if (posix_kill($pid, 0)) {
                 posix_kill($pid, SIGKILL);
-                Log::warning("HlsStreamService: Force killed FFmpeg process PID {$pid} for {$type} {$id} as graceful stop failed.");
+                Log::warning("HlsStreamService: Force killed FFmpeg process PID {$pid} for {$type} {$id} {$channelInfo} as graceful stop failed.");
             } else {
-                Log::info("HlsStreamService: Successfully stopped FFmpeg process PID {$pid} for {$type} {$id} gracefully.");
+                Log::info("HlsStreamService: Successfully stopped FFmpeg process PID {$pid} for {$type} {$id} {$channelInfo} gracefully.");
             }
             Cache::forget($cacheKey);
-            Log::debug("HlsStreamService: Cleared PID cache key {$cacheKey} for {$type} {$id}.");
+            Log::debug("HlsStreamService: Cleared PID cache key {$cacheKey} for {$type} {$id} {$channelInfo}.");
         } else {
             if ($pid) {
-                 Log::warning("HlsStreamService: Process with PID {$pid} for {$type} {$id} was found in cache but not running or not an FFmpeg process. Clearing stale PID.");
+                 Log::warning("HlsStreamService: Process with PID {$pid} for {$type} {$id} {$channelInfo} was found in cache but not running or not an FFmpeg process. Clearing stale PID.");
                  Cache::forget($cacheKey);
             } else {
-                 Log::info("HlsStreamService: No active FFmpeg PID found in cache for {$type} {$id}. No process to stop.");
+                 Log::info("HlsStreamService: No active FFmpeg PID found in cache for {$type} {$id} {$channelInfo}. No process to stop.");
             }
         }
 
-        Log::debug("HlsStreamService: Starting cleanup of Redis keys and HLS files for {$type} {$id}.");
-        // as there might be orphaned data.
-        Redis::srem("hls:active_{$type}_ids", $id); // Remove from active set
-        Redis::del("hls:{$type}_last_seen:{$id}"); // Remove last seen key
+        Log::debug("HlsStreamService: Starting cleanup of Redis keys and HLS files for {$type} {$id} {$channelInfo}.");
+        Redis::srem("hls:active_{$type}_ids", $id);
+        Redis::del("hls:{$type}_last_seen:{$id}");
         Redis::del("hls:streaminfo:starttime:{$type}:{$id}");
         Redis::del("hls:streaminfo:details:{$type}:{$id}");
 
-
-        // Cleanup on-disk HLS files
         if ($type === 'episode') {
             $storageDir = Storage::disk('app')->path("hls/e/{$id}");
         } else {
@@ -538,29 +531,28 @@ use Illuminate\Support\Facades\Http;
         }
         if (File::exists($storageDir)) {
             File::deleteDirectory($storageDir);
-            Log::info("HlsStreamService: Cleaned up HLS directory: {$storageDir}");
+            Log::info("HlsStreamService: Cleaned up HLS directory: {$storageDir} for {$type} {$id} {$channelInfo}.");
         } else {
-            Log::debug("HlsStreamService: HLS directory not found for cleanup: {$storageDir}");
+            Log::debug("HlsStreamService: HLS directory not found for cleanup (already deleted or never created): {$storageDir} for {$type} {$id} {$channelInfo}.");
         }
 
         if ($decrementCount && $model && $model->playlist) {
             $this->decrementActiveStreams($model->playlist->id);
-            Log::info("HlsStreamService: Decremented active stream count for playlist {$model->playlist->id} due to stop of {$type} {$id}.");
+            Log::info("HlsStreamService: Decremented active stream count for playlist {$model->playlist->id} due to stop of {$type} {$id} {$channelInfo}.");
         }
 
-        // Clean up any stream mappings (deprecated, but ensure cleanup if any linger)
         $mappingPattern = "hls:stream_mapping:{$type}:*";
         $mappingKeys = Redis::keys($mappingPattern);
         if (count($mappingKeys) > 0) {
-            Log::debug("HlsStreamService: Found old stream mapping keys for pattern {$mappingPattern}. Cleaning up...");
+            Log::debug("HlsStreamService: Found old stream mapping keys for pattern {$mappingPattern}. Cleaning up for {$type} {$id} {$channelInfo}...");
             foreach ($mappingKeys as $key) {
-                if (Redis::get($key) == $id) { // Check if the value matches the ID being stopped
+                if (Redis::get($key) == $id) {
                     Redis::del($key);
-                    Log::debug("HlsStreamService: Deleted stream mapping key: {$key}");
+                    Log::debug("HlsStreamService: Deleted stream mapping key: {$key} for {$type} {$id} {$channelInfo}.");
                 }
             }
         }
-        Log::info("HlsStreamService: Finished cleaning up resources for {$type} {$id}. Was running: " . ($wasRunning ? 'yes' : 'no'));
+        Log::info("HlsStreamService: Finished cleaning up resources for {$type} {$id} {$channelInfo}. Was running: " . ($wasRunning ? 'yes' : 'no'));
         return $wasRunning;
     }
 
@@ -575,7 +567,9 @@ use Illuminate\Support\Facades\Http;
     {
         $cacheKey = "hls:pid:{$type}:{$id}";
         $pid = Cache::get($cacheKey);
-        return $pid && posix_kill($pid, 0) && $this->isFfmpeg($pid);
+        $isRunning = $pid && posix_kill($pid, 0) && $this->isFfmpeg($pid);
+        // Log::debug("HlsStreamService: isRunning check for {$type} {$id}: PID from cache: {$pid}, Running: " . ($isRunning ? 'yes' : 'no'));
+        return $isRunning;
     }
 
     /**
@@ -610,6 +604,7 @@ use Illuminate\Support\Facades\Http;
         }
 
         // Default fallback (just check if process exists)
+        Log::warning("HlsStreamService: isFfmpeg check falling back to basic posix_kill for PID {$pid} due to unsupported OS_FAMILY: " . PHP_OS_FAMILY);
         return posix_kill($pid, 0);
     }
 
@@ -882,3 +877,5 @@ use Illuminate\Support\Facades\Http;
         return $cmd;
     }
 }
+
+[end of app/Services/HlsStreamService.php]
