@@ -98,6 +98,11 @@ You MUST review these two migration files and decide on the correct, canonical s
 *   The HLS failover system relies on the `active_channel_stream_id` column being present in the `channels` table and correctly linked via foreign key to the `channel_streams` table.
 Please resolve this schema conflict before deploying to production to ensure data integrity and correct feature operation.
 
+**Note on Failover-Related Tables:**
+The system uses two main concepts for handling stream redundancy:
+*   **`channel_streams` Table:** This table, central to the automated HLS failover implemented by the jobs (`StartStreamProcessingJob`, `MonitorStreamHealthJob`), stores multiple HLS source URLs for a *single logical channel*. The system automatically switches between these URLs if one fails or stalls.
+*   **`channel_failovers` Table:** This table (managed via Filament, as seen in `ChannelResource.php`) allows users to define relationships where one entire *channel* can act as a failover for another *channel*. For example, if "Channel A" is completely unavailable, a user might be manually or (via future enhancements) automatically redirected to "Channel B". The current automated HLS failover jobs do not yet utilize this table for automatic redirection to a different channel, but it's available for administrative setup and potential future integration.
+
 ### d. Queue Workers
 Queue workers are essential for processing stream startups, monitoring, and recovery tasks.
 *   Ensure your `QUEUE_CONNECTION` in `.env` is set to `database`, `redis`, or another async driver for production.
