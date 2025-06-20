@@ -610,30 +610,56 @@ class HlsStreamService
             $subtitleCodec = config('proxy.ffmpeg_codec_subtitles') ?: $settings['ffmpeg_codec_subtitles'];
 
             // Start building ffmpeg output codec formats
-            $outputFormat = "-c:v {$outputVideoCodec} " .
-                ($codecSpecificArgs ? trim($codecSpecificArgs) . " " : "");
+            $outputFormat = "-c:v {$outputVideoCodec} " . ($codecSpecificArgs ? trim($codecSpecificArgs) . " " : "");
+
+            if ($settings['ffmpeg_output_include_aud'] ?? true) {
+                $outputFormat .= '-aud:v:0 1 ';
+            }
 
             // Conditionally add audio codec
             if (!empty($audioCodec)) {
                 $outputFormat .= "-c:a {$audioCodec} ";
+                if ($settings['ffmpeg_audio_disposition_default'] ?? true) {
+                    $outputFormat .= '-disposition:a:0 default ';
+                }
             }
 
             // Conditionally add subtitle codec
-            if (!empty($subtitleCodec)) {
+            if ($settings['ffmpeg_disable_subtitles'] ?? true) {
+                $outputFormat .= '-sn ';
+            } elseif (!empty($subtitleCodec)) {
                 $outputFormat .= "-c:s {$subtitleCodec} ";
             }
             $outputFormat = trim($outputFormat); // Trim trailing space
 
             // Reconstruct FFmpeg Command (ensure $ffmpegPath is escaped if it can contain spaces, though unlikely for a binary name)
-            $cmd = escapeshellcmd($ffmpegPath) . ' ';
+            // Start with -y for overwriting output files
+            $cmd = escapeshellcmd($ffmpegPath) . ' -y ';
             $cmd .= $hwaccelInitArgs;  // e.g., -init_hw_device (goes before input options that use it, but after global options)
             $cmd .= $hwaccelInputArgs; // e.g., -hwaccel vaapi (these must go BEFORE the -i input)
 
-            // Low-latency flags for better HLS performance
-            $cmd .= '-fflags nobuffer+igndts -flags low_delay -avoid_negative_ts disabled ';
+            // New general input options from settings
+            if ($settings['ffmpeg_input_copyts'] ?? true) {
+                $cmd .= '-copyts ';
+            }
+            if ($settings['ffmpeg_input_stream_loop'] ?? false) {
+                $cmd .= '-stream_loop -1 ';
+            }
+            if ($settings['ffmpeg_enable_print_graphs'] ?? false) {
+                $timestamp = now()->format('Ymd-His');
+                $graphFileName = "{$storageDir}/ffmpeg-graph-{$type}-{$id}-{$timestamp}.txt";
+                $cmd .= '-print_graphs_file ' . escapeshellarg($graphFileName) . ' ';
+            }
 
-            // Input analysis optimization for faster stream start
-            $cmd .= '-analyzeduration 1M -probesize 1M -max_delay 500000 -fpsprobesize 0 ';
+            // Input analysis optimization for faster stream start (using settings)
+            // Replace old fflags with new one from settings. The old '-flags low_delay -avoid_negative_ts disabled' is removed.
+            $cmd .= '-fflags ' . escapeshellarg($settings['ffmpeg_input_fflags'] ?? 'nobuffer+igndts+discardcorruptts+fillwallclockdts') . ' ';
+
+            // Replace old analyzeduration, probesize, max_delay with new ones from settings. Keep fpsprobesize.
+            $cmd .= '-analyzeduration ' . escapeshellarg($settings['ffmpeg_input_analyzeduration'] ?? '3M') . ' ';
+            $cmd .= '-probesize ' . escapeshellarg($settings['ffmpeg_input_probesize'] ?? '3M') . ' ';
+            $cmd .= '-max_delay ' . escapeshellarg($settings['ffmpeg_input_max_delay'] ?? '5000000') . ' ';
+            $cmd .= '-fpsprobesize 0 '; // Keep this existing flag
 
             // Better error handling
             $cmd .= '-err_detect ignore_err -ignore_unknown ';
@@ -736,8 +762,16 @@ class HlsStreamService
             '-hls_base_url ' . escapeshellarg($segmentBaseUrl) . ' ' .
             escapeshellarg($m3uPlaylist) . ' ';
 
-        $cmd .= ($settings['ffmpeg_debug'] ? ' -loglevel verbose' : ' -hide_banner -nostats -loglevel error');
+        // Loglevel (very last)
+        if ($settings['ffmpeg_debug'] ?? false) {
+            // Check if 'ffmpeg_enable_print_graphs' is also true, timing implies verbose.
+            // If print_graphs is enabled, it often benefits from verbose logging.
+            // The 'timing' data is useful for performance analysis.
+            $cmd .= ' -loglevel verbose+timing';
+        } else {
+            $cmd .= ' -hide_banner -nostats -loglevel error';
+        }
 
-        return $cmd;
+        return trim($cmd);
     }
 }
