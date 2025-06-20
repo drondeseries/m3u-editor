@@ -201,16 +201,51 @@ class Preferences extends SettingsPage
                                             ->label('QSV Encoder Options (Optional)')
                                             ->columnSpan('full')
                                             ->placeholder('e.g., -profile:v high -g 90 -look_ahead 1')
-                                            ->helperText('Additional options for the h264_qsv (or hevc_qsv) encoder.')
+                                            ->helperText('Advanced QSV encoder options (e.g., `-profile:v high -g 90 -b:v:0 5M -maxrate:v:0 5M -bufsize:v:0 10M -keyint_min:v:0 90 -r:v:0 30000/1001`). Refer to FFmpeg h264_qsv/hevc_qsv documentation for details on bitrate, GOP, profile, framerate, etc.')
                                             ->rows(3)
                                             ->visible(fn(Get $get) => $get('hardware_acceleration_method') === 'qsv'),
                                         Forms\Components\Textarea::make('ffmpeg_qsv_additional_args')
                                             ->label('Additional QSV Arguments (Optional)')
                                             ->columnSpan('full')
                                             ->placeholder('e.g., -low_power 1 for some QSV encoders')
-                                            ->helperText('Advanced: Additional FFmpeg arguments specific to your QSV setup. Use with caution.')
+                                            ->helperText('Advanced QSV arguments applied *before* the input (e.g., `-c:v:0 h264_qsv -threads:v:0 1` for specific QSV input decoding, or advanced `-init_hw_device` options if defaults are insufficient). Use with caution.')
                                             ->rows(3)
                                             ->visible(fn(Get $get) => $get('hardware_acceleration_method') === 'qsv'),
+
+                                        // New FFmpeg General Input Settings
+                                        Forms\Components\Toggle::make('ffmpeg_input_copyts')
+                                            ->label('Copy Input Timestamps (-copyts)')
+                                            ->helperText('Copies timestamps from the source stream. Useful for maintaining A/V sync. Default: Enabled.'),
+                                        Forms\Components\Toggle::make('ffmpeg_input_stream_loop')
+                                            ->label('Loop Input Stream (-stream_loop -1)')
+                                            ->helperText('Loop the input stream indefinitely. Useful for live content or preventing exit on temporary source loss. Default: Disabled.'),
+                                        Forms\Components\TextInput::make('ffmpeg_input_analyzeduration')
+                                            ->label('Input Analyze Duration (-analyzeduration)')
+                                            ->helperText('How long FFmpeg should analyze the input stream (e.g., 3M for 3 million microseconds, 3s for 3 seconds). Default: 3M.'),
+                                        Forms\Components\TextInput::make('ffmpeg_input_probesize')
+                                            ->label('Input Probe Size (-probesize)')
+                                            ->helperText('Maximum data size FFmpeg should probe from input (e.g., 3M for 3MB). Default: 3M.'),
+                                        Forms\Components\TextInput::make('ffmpeg_input_max_delay')
+                                            ->label('Input Max Delay (-max_delay)')
+                                            ->helperText('Maximum decoding delay in microseconds (e.g., 5000000 for 5 seconds). Default: 5000000.'),
+                                        Forms\Components\TextInput::make('ffmpeg_input_fflags')
+                                            ->label('Input FFmpeg Flags (-fflags)')
+                                            ->helperText('Set specific input processing flags. Default: nobuffer+igndts+discardcorruptts+fillwallclockdts')
+                                            ->columnSpanFull(),
+
+                                        // New FFmpeg General Output Settings
+                                        Forms\Components\Toggle::make('ffmpeg_output_include_aud')
+                                            ->label('Include AUD in Output (-aud:v:0 1)')
+                                            ->helperText('Include Access Unit Delimiters in the video output. Can improve compatibility. Default: Enabled.'),
+                                        Forms\Components\Toggle::make('ffmpeg_disable_subtitles')
+                                            ->label('Disable Subtitles (-sn)')
+                                            ->helperText('Exclude subtitle tracks from the output. Default: Enabled.'),
+                                        Forms\Components\Toggle::make('ffmpeg_audio_disposition_default')
+                                            ->label('Set Default Audio Disposition (-disposition:a:0 default)')
+                                            ->helperText('Mark the first audio track as the default. Default: Enabled.'),
+                                        Forms\Components\Toggle::make('ffmpeg_enable_print_graphs')
+                                            ->label('Enable FFmpeg Filter Graph Debug (-print_graphs_file)')
+                                            ->helperText('Saves a textual representation of the filtergraphs to a file in the stream\'s HLS directory. For debugging. Default: Disabled.'),
 
                                         $this->makeCodecSelect('video', 'ffmpeg_codec_video', $form),
                                         $this->makeCodecSelect('audio', 'ffmpeg_codec_audio', $form),
