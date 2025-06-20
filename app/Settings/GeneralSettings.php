@@ -52,32 +52,7 @@ class GeneralSettings extends Settings
     public ?string $ffmpeg_qsv_encoder_options = null;
     public ?string $ffmpeg_qsv_additional_args = null;
 
-    // It's good practice to initialize defaults here if the migration doesn't always run first
-    // or if these properties are ever accessed before a migration sets them.
-    // However, the SettingsMigration `add` method usually handles the default in the DB.
-    // For clarity and safety, especially for non-nullable types, let's add them.
-    // Spatie Laravel Settings will use these if the DB value is null or not set.
-
-    public function __construct(array $attributes = [])
-    {
-        parent::__construct($attributes);
-
-        // Default values for new properties if not already set from DB
-        // Note: Spatie settings automatically handles defaults specified in migrations
-        // for properties that are not explicitly initialized here.
-        // However, for boolean properties, it's good to be explicit if they are not nullable.
-        $this->ffmpeg_input_copyts = $attributes['ffmpeg_input_copyts'] ?? true;
-        $this->ffmpeg_input_analyzeduration = $attributes['ffmpeg_input_analyzeduration'] ?? '3M';
-        $this->ffmpeg_input_probesize = $attributes['ffmpeg_input_probesize'] ?? '3M';
-        $this->ffmpeg_input_max_delay = $attributes['ffmpeg_input_max_delay'] ?? '5000000';
-        $this->ffmpeg_input_fflags = $attributes['ffmpeg_input_fflags'] ?? 'nobuffer+igndts+discardcorruptts+fillwallclockdts';
-        $this->ffmpeg_output_include_aud = $attributes['ffmpeg_output_include_aud'] ?? true;
-        $this->ffmpeg_enable_print_graphs = $attributes['ffmpeg_enable_print_graphs'] ?? false;
-        $this->ffmpeg_input_stream_loop = $attributes['ffmpeg_input_stream_loop'] ?? false;
-        $this->ffmpeg_disable_subtitles = $attributes['ffmpeg_disable_subtitles'] ?? true;
-        $this->ffmpeg_audio_disposition_default = $attributes['ffmpeg_audio_disposition_default'] ?? true;
-    }
-
+    // Constructor removed. Defaults are handled by migrations and Spatie Settings package.
 
     public static function group(): string
     {
