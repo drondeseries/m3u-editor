@@ -14,6 +14,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Redis;
 use Illuminate\Support\Facades\Storage;
 use Symfony\Component\Process\Process as SymfonyProcess;
+use App\Jobs\MonitorFfmpegStreamJob;
 
 class HlsStreamService
 {
@@ -206,13 +207,24 @@ class HlsStreamService
         // Setup the stream
         $cmd = $this->buildCmd($type, $model->id, $userAgent, $streamUrl);
 
-        // Use proc_open approach similar to startStream
+        // Define stderr log path
+        $stderrLogDir = storage_path(config('proxy.ffmpeg_stderr_log_directory', 'logs/ffmpeg_stderr'));
+        File::ensureDirectoryExists($stderrLogDir);
+        $stderrLogFilename = "ffmpeg_stderr_{$type}_{$model->id}_" . time() . ".log";
+        $stderrLogPath = $stderrLogDir . '/' . $stderrLogFilename;
+
+        // Store the stderr log path for potential cleanup by stopStream
+        $stderrLogCacheKey = "hls:stderr_log_path:{$type}:{$model->id}";
+        Cache::put($stderrLogCacheKey, $stderrLogPath, now()->addDays(config('proxy.ffmpeg_stderr_log_retention_days', 2)));
+
+
         $descriptors = [
-            0 => ['pipe', 'r'],
-            1 => ['pipe', 'w'],
-            2 => ['pipe', 'w'],
+            0 => ['pipe', 'r'], // stdin
+            1 => ['pipe', 'w'], // stdout
+            2 => ['file', $stderrLogPath, 'a'] // stderr (append to log file)
         ];
         $pipes = [];
+
         if ($type === 'episode') {
             $workingDir = Storage::disk('app')->path("hls/e/{$model->id}");
         } else {
@@ -221,44 +233,31 @@ class HlsStreamService
         $process = proc_open($cmd, $descriptors, $pipes, $workingDir);
 
         if (!is_resource($process)) {
+            // Clean up the empty log file if proc_open fails
+            if (File::exists($stderrLogPath)) {
+                File::delete($stderrLogPath);
+            }
+            Cache::forget($stderrLogCacheKey);
             throw new Exception("Failed to launch FFmpeg for {$title}");
         }
 
-        // Immediately close stdin/stdout
+        // Immediately close stdin and stdout as they are not directly used by this PHP process
         fclose($pipes[0]);
         fclose($pipes[1]);
-
-        // Make stderr non-blocking
-        stream_set_blocking($pipes[2], false);
-
-        // Spawn a little "reader" that pulls from stderr and logs
-        $logger = Log::channel('ffmpeg');
-        $stderr = $pipes[2];
-
-        // Get the PID and cache it
-        $cacheKey = "hls:pid:{$type}:{$model->id}";
-
-        // Register shutdown function to ensure the pipe is drained
-        register_shutdown_function(function () use (
-            $stderr,
-            $process,
-            $logger
-        ) {
-            while (!feof($stderr)) {
-                $line = fgets($stderr);
-                if ($line !== false) {
-                    $logger->error(trim($line));
-                }
-            }
-            fclose($stderr);
-            proc_close($process);
-        });
+        // stderr is a file, no need to fclose here, FFmpeg process will handle it.
 
         // Cache the actual FFmpeg PID
         $status = proc_get_status($process);
         $pid = $status['pid'];
-        // $cacheKey is "hls:pid:{$type}:{$model->id}" which is correct for the PID
+        $cacheKey = "hls:pid:{$type}:{$model->id}";
         Cache::forever($cacheKey, $pid);
+
+        // The old register_shutdown_function is removed as stderr is now logged to a file
+        // and monitored by MonitorFfmpegStreamJob.
+        // We still need to ensure proc_close is called eventually,
+        // but it's generally handled when the process object goes out of scope or explicitly.
+        // For detached processes, this is less of an immediate concern for this script.
+        // proc_close($process); // This would block if called here before process ends.
 
         // Store the process start time
         $startTimeCacheKey = "hls:streaminfo:starttime:{$type}:{$model->id}";
@@ -266,15 +265,28 @@ class HlsStreamService
         Redis::setex($startTimeCacheKey, 604800, $currentTime); // 7 days TTL
         Log::channel('ffmpeg')->debug("Stored ffmpeg process start time for {$type} ID {$model->id} at {$currentTime}");
 
-        // Record timestamp in Redis (never expires until we prune)
-        // This key represents when the startStream method was last invoked for this model,
-        // which is different from the ffmpeg process actual start time. Keep for now.
+        // Record timestamp in Redis
         Redis::set("hls:{$type}_last_seen:{$model->id}", now()->timestamp);
 
         // Add to active IDs set
         Redis::sadd("hls:active_{$type}_ids", $model->id);
 
-        Log::channel('ffmpeg')->debug("Streaming {$type} {$title} with command: {$cmd}");
+        Log::channel('ffmpeg')->debug("Streaming {$type} {$title} (PID: {$pid}) with command: {$cmd}. Stderr logged to: {$stderrLogPath}");
+
+        // Dispatch the monitoring job if live failover is enabled
+        if (config('proxy.ffmpeg_live_failover_enabled', false)) {
+            MonitorFfmpegStreamJob::dispatch(
+                $type,
+                $model->id,
+                $pid,
+                $streamUrl,
+                $stderrLogPath
+            )->onQueue(config('proxy.ffmpeg_monitor_job_queue', 'default'));
+            Log::channel('ffmpeg')->info("Dispatched MonitorFfmpegStreamJob for {$type} ID {$model->id}, PID {$pid}.");
+        } else {
+            Log::channel('ffmpeg')->info("Live failover monitoring is disabled. MonitorFfmpegStreamJob not dispatched for {$type} ID {$model->id}, PID {$pid}.");
+        }
+
         return $pid;
     }
 
@@ -385,12 +397,15 @@ class HlsStreamService
      *
      * @param string $type
      * @param string $id
+     * @param int|null $pidToKill Specific PID to target, used by failover.
      * @return bool
      */
-    public function stopStream($type, $id): bool
+    public function stopStream($type, $id, ?int $pidToKill = null): bool
     {
-        $cacheKey = "hls:pid:{$type}:{$id}";
-        $pid = Cache::get($cacheKey);
+        $pidCacheKey = "hls:pid:{$type}:{$id}";
+        $cachedPid = Cache::get($pidCacheKey);
+        $pid = $pidToKill ?: $cachedPid; // Use specific PID if provided, else fallback to cached PID
+
         $wasRunning = false;
 
         // Get the model to access playlist for stream count decrementing
@@ -405,54 +420,79 @@ class HlsStreamService
             $wasRunning = true;
 
             // Give process time to cleanup gracefully
-            posix_kill($pid, SIGTERM);
+            posix_kill($pid, SIGTERM); // Send TERM signal
             $attempts = 0;
-            while ($attempts < 30 && posix_kill($pid, 0)) {
+            // Check if process is still alive. posix_kill($pid, 0) returns true if process exists.
+            while ($attempts < 30 && $pid && posix_kill($pid, 0)) {
                 usleep(100000); // 100ms
                 $attempts++;
             }
 
             // Force kill if still running
-            if (posix_kill($pid, 0)) {
-                posix_kill($pid, SIGKILL);
+            if ($pid && posix_kill($pid, 0)) {
+                posix_kill($pid, SIGKILL); // Send KILL signal
                 Log::channel('ffmpeg')->warning("Force killed FFmpeg process {$pid} for {$type} {$id}");
             }
-            Cache::forget($cacheKey);
+            // Only forget the main PID cache if the PID we just killed matches the cached one,
+            // or if no specific PID was given (meaning we intended to stop the canonical stream for this ID).
+            if ($pid === $cachedPid || $pidToKill === null) {
+                Cache::forget($pidCacheKey);
+            }
         } else {
-            Log::channel('ffmpeg')->warning("No running FFmpeg process for channel {$id} to stop.");
+            Log::channel('ffmpeg')->warning("No running FFmpeg process {$pid} for {$type} {$id} to stop (or PID was not found).");
         }
 
-        // Remove from active IDs set
-        Redis::srem("hls:active_{$type}_ids", $id);
-        Redis::del("hls:streaminfo:starttime:{$type}:{$id}");
-        Redis::del("hls:streaminfo:details:{$type}:{$id}");
+        // If we are stopping the canonical stream for this ID (not just a rogue PID)
+        if ($pidToKill === null || $pidToKill === $cachedPid) {
+            // Remove from active IDs set
+            Redis::srem("hls:active_{$type}_ids", $id);
+            Redis::del("hls:streaminfo:starttime:{$type}:{$id}");
+            Redis::del("hls:streaminfo:details:{$type}:{$id}");
 
-        // Cleanup on-disk HLS files
+            // Clean up the stderr log file associated with this stream
+            $stderrLogCacheKey = "hls:stderr_log_path:{$type}:{$id}";
+            $stderrLogPath = Cache::get($stderrLogCacheKey);
+            if ($stderrLogPath && File::exists($stderrLogPath)) {
+                File::delete($stderrLogPath);
+                Log::channel('ffmpeg')->debug("Deleted stderr log file: {$stderrLogPath}");
+            }
+            Cache::forget($stderrLogCacheKey);
+        }
+
+
+        // Cleanup on-disk HLS files (only if this is the canonical stream being stopped)
+        // This check is important because a failover might stop an old PID while a new one is already using the directory.
+        if ($pidToKill === null || $pidToKill === $cachedPid) {
         if ($type === 'episode') {
             $storageDir = Storage::disk('app')->path("hls/e/{$id}");
         } else {
             $storageDir = Storage::disk('app')->path("hls/{$id}");
         }
-        File::deleteDirectory($storageDir);
+            File::deleteDirectory($storageDir);
+            Log::channel('ffmpeg')->debug("Deleted HLS directory: {$storageDir}");
 
-        // Decrement active streams count if we have the model and playlist
-        if ($model) {
-            $playlist = $model->getEffectivePlaylist();
-            if ($playlist) {
-                $this->decrementActiveStreams($playlist->id);
+            // Decrement active streams count if we have the model and playlist
+            if ($model) {
+                $playlist = $model->getEffectivePlaylist();
+                if ($playlist) {
+                    $this->decrementActiveStreams($playlist->id);
+                }
             }
+
+            // Clean up any stream mappings that point to this stopped stream
+            $mappingPattern = "hls:stream_mapping:{$type}:*";
+            $mappingKeys = Redis::keys($mappingPattern);
+            foreach ($mappingKeys as $key) {
+                if (Cache::get($key) == $id) {
+                    Cache::forget($key);
+                    Log::channel('ffmpeg')->debug("Cleaned up stream mapping: {$key} -> {$id}");
+                }
+            }
+            Log::channel('ffmpeg')->debug("Cleaned up stream resources for {$type} {$id}");
+        } else {
+            Log::channel('ffmpeg')->debug("PID {$pidToKill} was specified for {$type} {$id}, HLS directory and stream counts not cleaned up by this call to preserve new stream if failover occurred.");
         }
 
-        // Clean up any stream mappings that point to this stopped stream
-        $mappingPattern = "hls:stream_mapping:{$type}:*";
-        $mappingKeys = Redis::keys($mappingPattern);
-        foreach ($mappingKeys as $key) {
-            if (Cache::get($key) == $id) {
-                Cache::forget($key);
-                Log::channel('ffmpeg')->debug("Cleaned up stream mapping: {$key} -> {$id}");
-            }
-        }
-        Log::channel('ffmpeg')->debug("Cleaned up stream resources for {$type} {$id}");
 
         return $wasRunning;
     }
@@ -809,5 +849,191 @@ class HlsStreamService
         }
 
         return trim($cmd);
+    }
+
+    /**
+     * Trigger a live failover for a stream that is currently experiencing issues.
+     *
+     * @param string $modelType 'channel' or 'episode'
+     * @param int|string $modelId ID of the Channel or Episode
+     * @param string $failedStreamUrl The URL that was confirmed to be failing
+     * @param int $currentPidToKill The PID of the FFmpeg process for the failing stream
+     * @return bool True if failover was attempted and a new stream started, false otherwise
+     */
+    public function triggerLiveFailover(string $modelType, $modelId, string $failedStreamUrl, int $currentPidToKill): bool
+    {
+        Log::channel('ffmpeg')->warning("LIVE FAILOVER: Initiating for {$modelType} ID {$modelId}, PID {$currentPidToKill}, Failed URL: {$failedStreamUrl}");
+
+        // 1. Stop the current failing stream, targeting the specific PID
+        $this->stopStream($modelType, $modelId, $currentPidToKill);
+        Log::channel('ffmpeg')->info("LIVE FAILOVER: Stopped failing FFmpeg process PID {$currentPidToKill} for {$modelType} ID {$modelId}.");
+
+        // 2. Load the primary model instance
+        $originalModel = null;
+        if ($modelType === 'channel') {
+            $originalModel = Channel::with('failoverChannels')->find($modelId);
+        } elseif ($modelType === 'episode') {
+            $originalModel = Episode::find($modelId);
+        }
+
+        if (!$originalModel) {
+            Log::channel('ffmpeg')->error("LIVE FAILOVER: Could not find {$modelType} with ID {$modelId}. Aborting failover.");
+            return false;
+        }
+
+        $originalModelTitle = strip_tags($modelType === 'channel' ? ($originalModel->title_custom ?? $originalModel->title) : $originalModel->title);
+
+        // 3. Mark the failed stream URL as bad for this specific model and its playlist
+        // The bad source cache key is typically model_id + playlist_id.
+        // We need to ensure we're using the correct playlist context for the failed URL.
+        // For simplicity, we'll mark it bad based on the original model's effective playlist.
+        // This assumes the failedStreamUrl was associated with this originalModel directly or as one of its failovers.
+        $effectivePlaylist = $originalModel->getEffectivePlaylist();
+        if ($effectivePlaylist) {
+            // The bad source cache key used in startStream is `ProxyService::BAD_SOURCE_CACHE_PREFIX . $stream->id . ':' . $playlist->id;`
+            // Here, $originalModel->id is the ID of the stream configuration (e.g. channel 123)
+            // and $failedStreamUrl is one of its sources.
+            // We mark the *combination* of this model ID and its playlist as having a bad experience with $failedStreamUrl.
+            // However, the current bad source logic is tied to the source *model's* ID, not the URL itself.
+            // For live failover, we need to be more granular. Let's create a specific cache key for the URL for this model.
+            $badSourceUrlCacheKey = "hls:bad_live_source_url:{$modelType}:{$originalModel->id}:" . md5($failedStreamUrl);
+            $badSourceCooldown = config('proxy.ffmpeg_live_failover_bad_source_cooldown_seconds', 300);
+            Redis::setex($badSourceUrlCacheKey, $badSourceCooldown, "Failed during live monitoring at " . now()->toDateTimeString());
+            Log::channel('ffmpeg')->info("LIVE FAILOVER: Marked URL {$failedStreamUrl} as bad for {$modelType} ID {$originalModel->id} for {$badSourceCooldown} seconds. Cache key: {$badSourceUrlCacheKey}");
+        } else {
+            Log::channel('ffmpeg')->warning("LIVE FAILOVER: Could not determine effective playlist for {$modelType} ID {$originalModel->id} to mark bad source URL.");
+        }
+
+
+        // 4. Prepare a list of potential sources to try
+        $sourcesToTry = collect([]);
+        if ($originalModel instanceof Channel) {
+            // Add primary URL if it exists
+            $primaryUrl = $originalModel->url_custom ?? $originalModel->url;
+            if ($primaryUrl) {
+                $sourcesToTry->push(['model' => $originalModel, 'url' => $primaryUrl, 'title' => $originalModelTitle]);
+            }
+            // Add failover channels
+            foreach ($originalModel->failoverChannels as $failoverChannel) {
+                $failoverUrl = $failoverChannel->url_custom ?? $failoverChannel->url;
+                if ($failoverUrl) {
+                    $failoverTitle = strip_tags($failoverChannel->title_custom ?? $failoverChannel->title);
+                    $sourcesToTry->push(['model' => $failoverChannel, 'url' => $failoverUrl, 'title' => $failoverTitle]);
+                }
+            }
+        } elseif ($originalModel instanceof Episode) {
+            if ($originalModel->url) {
+                 $sourcesToTry->push(['model' => $originalModel, 'url' => $originalModel->url, 'title' => $originalModelTitle]);
+            }
+        }
+
+        // 5. Iterate and attempt to start a new stream
+        // This loop is similar to the one in `startStream` but simplified for failover context.
+        $streamSettings = ProxyService::getStreamSettings();
+        $ffprobeTimeout = $streamSettings['ffmpeg_ffprobe_timeout'] ?? 5;
+
+        foreach ($sourcesToTry as $sourceAttempt) {
+            $currentStreamModel = $sourceAttempt['model']; // This is the Channel/Episode object providing the URL
+            $currentAttemptStreamUrl = $sourceAttempt['url'];
+            $currentStreamTitle = $sourceAttempt['title'];
+
+            // Skip the URL that just failed
+            if ($currentAttemptStreamUrl === $failedStreamUrl) {
+                Log::channel('ffmpeg')->debug("LIVE FAILOVER: Skipping URL {$currentAttemptStreamUrl} as it's the one that just failed.");
+                continue;
+            }
+
+            // Check if this URL was recently marked as bad by a live failover for the *original* model
+            $badUrlCacheKey = "hls:bad_live_source_url:{$modelType}:{$originalModel->id}:" . md5($currentAttemptStreamUrl);
+            if (Redis::exists($badUrlCacheKey)) {
+                Log::channel('ffmpeg')->debug("LIVE FAILOVER: Skipping URL {$currentAttemptStreamUrl} for {$modelType} ID {$originalModel->id} as it was recently marked bad by live failover. Reason: " . Redis::get($badUrlCacheKey));
+                continue;
+            }
+
+            // Also check the standard bad source cache (which is based on $currentStreamModel->id and its playlist)
+            $playlistForCurrentAttempt = $currentStreamModel->getEffectivePlaylist();
+            if (!$playlistForCurrentAttempt) {
+                 Log::channel('ffmpeg')->warning("LIVE FAILOVER: Could not get effective playlist for potential source model ID {$currentStreamModel->id} ({$currentStreamTitle}). Skipping.");
+                 continue;
+            }
+            $standardBadSourceCacheKey = ProxyService::BAD_SOURCE_CACHE_PREFIX . $currentStreamModel->id . ':' . $playlistForCurrentAttempt->id;
+            if (Redis::exists($standardBadSourceCacheKey)) {
+                Log::channel('ffmpeg')->debug("LIVE FAILOVER: Skipping URL {$currentAttemptStreamUrl} (from model ID {$currentStreamModel->id}) as it's marked in standard bad source cache for playlist {$playlistForCurrentAttempt->id}. Reason: " . Redis::get($standardBadSourceCacheKey));
+                continue;
+            }
+
+            // Check stream limits for the playlist of the source being attempted
+            // Note: The active streams count for the *original* model's playlist was decremented by stopStream if the PID matched.
+            // If the new source is on a *different* playlist, we need to manage its count.
+            // For simplicity in live failover, we are assuming the failover source uses resources associated with the *original* model's context.
+            // The primary stream count management is done in startStream. Here, we are just trying to get *any* source up for the *original* model's slot.
+
+            $userAgent = $playlistForCurrentAttempt->user_agent ?? null;
+
+            try {
+                Log::channel('ffmpeg')->info("LIVE FAILOVER: Attempting to start new stream for {$modelType} ID {$originalModel->id} using URL {$currentAttemptStreamUrl} from source model ID {$currentStreamModel->id} ('{$currentStreamTitle}').");
+
+                // Pre-check the new source
+                // We use $originalModel->id for pre-check caching because the HLS segments belong to the original model.
+                $this->runPreCheck($modelType, $originalModel->id, $currentAttemptStreamUrl, $userAgent, $currentStreamTitle, $ffprobeTimeout);
+
+                // Start the streaming process.
+                // IMPORTANT: We use $originalModel here, not $currentStreamModel, because the HLS output path,
+                // PID caching, and monitoring job are all tied to the ID of the stream the user *requested*,
+                // which is $originalModel->id.
+                // The $currentStreamModel only provides the $currentAttemptStreamUrl and $currentStreamTitle for this attempt.
+                $this->startStreamingProcess(
+                    type: $modelType,
+                    model: $originalModel, // Use the original model for consistent HLS path and IDing
+                    streamUrl: $currentAttemptStreamUrl,
+                    title: $currentStreamTitle, // Can use the title of the actual source for logging clarity
+                    playlistId: $playlistForCurrentAttempt->id, // Playlist ID of the source providing the URL
+                    userAgent: $userAgent
+                );
+
+                Log::channel('ffmpeg')->info("LIVE FAILOVER: Successfully started new stream for {$modelType} ID {$originalModel->id} using URL {$currentAttemptStreamUrl}.");
+                // Prevent this URL from being immediately retried if this new stream also fails quickly
+                $this->clearRecentlyFailedMarkerForSuccessfulFailover($modelType, $originalModel->id);
+                return true; // Failover successful
+
+            } catch (SourceNotResponding $e) {
+                Log::channel('ffmpeg')->error("LIVE FAILOVER: SourceNotResponding for {$modelType} ID {$originalModel->id} with URL {$currentAttemptStreamUrl}. Error: " . $e->getMessage());
+                // Mark this URL as bad using only the short-term live failover cache for the original model ID.
+                // Do NOT use $standardBadSourceCacheKey here to avoid influencing new client sessions.
+                Redis::setex($badUrlCacheKey, $badSourceCooldown, "Failed during live failover pre-check: " . $e->getMessage());
+                Log::channel('ffmpeg')->info("LIVE FAILOVER: Marked URL {$currentAttemptStreamUrl} as bad for {$modelType} ID {$originalModel->id} (short-term live cache only) due to SourceNotResponding.");
+                continue; // Try next source
+            } catch (Exception $e) {
+                Log::channel('ffmpeg')->error("LIVE FAILOVER: Exception for {$modelType} ID {$originalModel->id} with URL {$currentAttemptStreamUrl}. Error: " . $e->getMessage());
+                // Mark this URL as bad using only the short-term live failover cache for the original model ID.
+                // Do NOT use $standardBadSourceCacheKey here to avoid influencing new client sessions.
+                Redis::setex($badUrlCacheKey, $badSourceCooldown, "Exception during live failover attempt: " . $e->getMessage());
+                Log::channel('ffmpeg')->info("LIVE FAILOVER: Marked URL {$currentAttemptStreamUrl} as bad for {$modelType} ID {$originalModel->id} (short-term live cache only) due to Exception.");
+                continue; // Try next source
+            }
+        }
+
+        // 6. If all sources failed
+        Log::channel('ffmpeg')->error("LIVE FAILOVER: All available sources failed for {$modelType} ID {$originalModel->id}. No new stream started.");
+        // Implement cycle prevention: Mark the original model as "all sources failed" for a longer period
+        $allSourcesFailedCacheKey = "hls:all_sources_failed_live:{$modelType}:{$originalModel->id}";
+        $allSourcesFailedCooldown = config('proxy.ffmpeg_live_failover_all_sources_failed_cooldown_seconds', 900); // e.g., 15 minutes
+        Redis::setex($allSourcesFailedCacheKey, $allSourcesFailedCooldown, now()->toDateTimeString());
+        Log::channel('ffmpeg')->warning("LIVE FAILOVER: {$modelType} ID {$originalModel->id} marked as all sources failed for {$allSourcesFailedCooldown} seconds.");
+
+        return false;
+    }
+
+    /**
+     * Clears the 'all sources failed' marker for a stream if a failover was ultimately successful.
+     * This prevents a successful stream from being blocked by a previous total outage.
+     */
+    private function clearRecentlyFailedMarkerForSuccessfulFailover(string $modelType, $modelId): void
+    {
+        $allSourcesFailedCacheKey = "hls:all_sources_failed_live:{$modelType}:{$modelId}";
+        if (Redis::exists($allSourcesFailedCacheKey)) {
+            Redis::del($allSourcesFailedCacheKey);
+            Log::channel('ffmpeg')->info("LIVE FAILOVER: Cleared 'all sources failed' marker for {$modelType} ID {$modelId} due to successful failover.");
+        }
     }
 }
