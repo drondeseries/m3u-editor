@@ -52,8 +52,13 @@ return [
 
     // How often (in seconds) the MonitorFfmpegStreamJob should check the stderr log and stream status.
     'ffmpeg_monitor_interval_seconds' => env('PROXY_FFMPEG_MONITOR_INTERVAL_SECONDS', 5),
-    // The queue name for MonitorFfmpegStreamJob.
-    'ffmpeg_monitor_job_queue' => env('PROXY_FFMPEG_MONITOR_JOB_QUEUE', 'default'),
+
+    /**
+     * The dedicated queue name for the long-running FFmpeg monitoring job.
+     * This allows us to use a separate, long-timeout worker for these jobs.
+     */
+    'ffmpeg_monitor_job_queue' => env('PROXY_FFMPEG_MONITOR_JOB_QUEUE', 'monitoring'),
+
     // Unique lock timeout for the monitoring job (in seconds).
     'ffmpeg_monitor_job_unique_lock_timeout' => env('PROXY_FFMPEG_MONITOR_JOB_UNIQUE_LOCK_TIMEOUT', 86400), // 24 hours
 
