@@ -33,11 +33,14 @@ class HlsStreamService
         string $title           // This $title is the title of the *original* model
     ): ?object {
         $lockKey = "lock:hls_startup:{$type}:{$model->id}";
-        // Attempt to acquire lock for 30 seconds, lock TTL is 60 seconds.
-        $lock = Cache::lock($lockKey, 60);
+        $lock = Cache::lock($lockKey, 60); // Create a lock instance with 60s TTL
+        $lockAcquired = false; // Flag to track if lock was acquired
 
         try {
-            if (!$lock->get()) {
+            if ($lock->get()) { // Attempt to acquire the lock
+                $lockAcquired = true;
+                // Lock acquired, proceed with stream starting logic
+            } else {
                 // Failed to acquire lock, another process is likely starting this stream.
                 Log::channel('ffmpeg')->warning("HLS Stream: Could not acquire startup lock for $type ID {$model->id} ({$title}). Another request may be processing it.");
                 // Consider throwing a custom exception here if the controller needs to handle it specifically.
@@ -169,15 +172,11 @@ class HlsStreamService
             // Catch any other general exceptions that might occur within the lock acquisition block
             // This is a safety net, specific errors should be handled within the main loop if possible.
             Log::channel('ffmpeg')->error("HLS Stream: Unexpected exception during stream startup for $type ID {$model->id} ({$title}): " . $e->getMessage());
-            // Ensure the lock is released if it was acquired and an unexpected error occurred.
-            // Though the main logic should handle releases in success/fail paths.
-            if (isset($lock) && $lock->owner() === Cache::getStore()->getLockProvider()->getCurrentOwner()) { // Check if we own the lock
-                 $lock->release();
-            }
-            throw $e; // Re-throw the exception after attempting to release the lock
+            // Lock release is handled in the finally block.
+            throw $e; // Re-throw the exception
         } finally {
             // Always ensure the lock is released if it was acquired by this instance.
-            if (isset($lock) && $lock->owner() === Cache::getStore()->getLockProvider()->getCurrentOwner()) {
+            if ($lockAcquired) {
                 $lock->release();
             }
         }
@@ -713,7 +712,7 @@ class HlsStreamService
             $cmd .= $videoFilterArgs; // e.g., -vf 'scale_vaapi=format=nv12' or -vf 'vpp_qsv=format=nv12'
 
             $cmd .= $outputFormat . ' ';
-            $cmd .= '-vsync cfr '; // Add the vsync flag here
+            $cmd .= '-fps_mode cfr '; // Replaced deprecated -vsync cfr
         } else {
             // Custom command template is provided
             $cmd = $customCommandTemplate;
