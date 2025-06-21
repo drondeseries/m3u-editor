@@ -230,7 +230,7 @@ class Preferences extends SettingsPage
                                             ->helperText('Maximum decoding delay in microseconds (e.g., 5000000 for 5 seconds). Default: 5000000.'),
                                         Forms\Components\TextInput::make('ffmpeg_input_fflags')
                                             ->label('Input FFmpeg Flags (-fflags)')
-                                            ->helperText('Set specific input processing flags (e.g., nobuffer+igndts+low_delay). Some flags like discardcorruptts or fillwallclockdts may not be supported by all FFmpeg versions and can cause errors. Start with known safe flags. Default: nobuffer+igndts+low_delay')
+                                            ->helperText('Set custom input fflags (e.g., nobuffer+igndts). The application separately adds -flags low_delay and -avoid_negative_ts disabled. Some fflags like discardcorruptts or fillwallclockdts may not be supported by all FFmpeg versions and can cause errors. Default: nobuffer+igndts')
                                             ->columnSpanFull(),
 
                                         // New FFmpeg General Output Settings

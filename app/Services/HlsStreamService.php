@@ -652,15 +652,16 @@ class HlsStreamService
             }
 
             // Input analysis optimization for faster stream start (using settings)
-            // Use the new default 'nobuffer+igndts+low_delay' for ffmpeg_input_fflags from settings
-            $cmd .= '-fflags ' . escapeshellarg($settings['ffmpeg_input_fflags'] ?? 'nobuffer+igndts+low_delay') . ' ';
-            $cmd .= '-avoid_negative_ts disabled '; // Add this flag back
-
-            // Replace old analyzeduration, probesize, max_delay with new ones from settings. Keep fpsprobesize.
+            // analysis duration, probesize, max_delay, fpsprobesize
             $cmd .= '-analyzeduration ' . escapeshellarg($settings['ffmpeg_input_analyzeduration'] ?? '3M') . ' ';
             $cmd .= '-probesize ' . escapeshellarg($settings['ffmpeg_input_probesize'] ?? '3M') . ' ';
             $cmd .= '-max_delay ' . escapeshellarg($settings['ffmpeg_input_max_delay'] ?? '5000000') . ' ';
             $cmd .= '-fpsprobesize 0 '; // Keep this existing flag
+
+            // Use the new default 'nobuffer+igndts' for ffmpeg_input_fflags from settings
+            $cmd .= '-fflags ' . escapeshellarg($settings['ffmpeg_input_fflags'] ?? 'nobuffer+igndts') . ' ';
+            $cmd .= '-flags low_delay '; // Add -flags low_delay separately
+            $cmd .= '-avoid_negative_ts disabled '; // Keep this flag
 
             // Better error handling
             $cmd .= '-err_detect ignore_err -ignore_unknown ';
