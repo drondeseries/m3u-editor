@@ -127,10 +127,25 @@ class ProxyService
                 'ffmpeg_codec_audio' => $userPreferences->ffmpeg_codec_audio ?? $settings['ffmpeg_codec_audio'],
                 'ffmpeg_codec_subtitles' => $userPreferences->ffmpeg_codec_subtitles ?? $settings['ffmpeg_codec_subtitles'],
                 'ffmpeg_path' => $userPreferences->ffmpeg_path ?? $settings['ffmpeg_path'],
-                'ffmpeg_hls_time' => $userPreferences->ffmpeg_hls_time ?? 4,
-                'ffmpeg_ffprobe_timeout' => $userPreferences->ffmpeg_ffprobe_timeout ?? 5,
+                'ffmpeg_hls_time' => $userPreferences->ffmpeg_hls_time ?? 4, // Keep existing
+                'ffmpeg_ffprobe_timeout' => $userPreferences->ffmpeg_ffprobe_timeout ?? 5, // Keep existing
+                'hls_playlist_max_attempts' => $userPreferences->hls_playlist_max_attempts ?? 10, // Existing, ensure it's here
+                'hls_playlist_sleep_seconds' => $userPreferences->hls_playlist_sleep_seconds ?? 1.0, // Existing, ensure it's here
 
-                // HW acceleration settings
+                // --- NEWLY ADDED SETTINGS ---
+                'ffmpeg_input_copyts' => $userPreferences->ffmpeg_input_copyts ?? true,
+                'ffmpeg_input_stream_loop' => $userPreferences->ffmpeg_input_stream_loop ?? false,
+                'ffmpeg_input_analyzeduration' => $userPreferences->ffmpeg_input_analyzeduration ?? '3M',
+                'ffmpeg_input_probesize' => $userPreferences->ffmpeg_input_probesize ?? '3M',
+                'ffmpeg_input_max_delay' => $userPreferences->ffmpeg_input_max_delay ?? '5000000',
+                'ffmpeg_input_fflags' => $userPreferences->ffmpeg_input_fflags ?? 'nobuffer+igndts', // Use the latest corrected default
+                'ffmpeg_output_include_aud' => $userPreferences->ffmpeg_output_include_aud ?? true,
+                'ffmpeg_enable_print_graphs' => $userPreferences->ffmpeg_enable_print_graphs ?? false,
+                'ffmpeg_disable_subtitles' => $userPreferences->ffmpeg_disable_subtitles ?? true,
+                'ffmpeg_audio_disposition_default' => $userPreferences->ffmpeg_audio_disposition_default ?? true,
+                // --- END NEWLY ADDED SETTINGS ---
+
+                // HW acceleration settings (existing)
                 'hardware_acceleration_method' => $userPreferences->hardware_acceleration_method ?? $settings['hardware_acceleration_method'],
                 'ffmpeg_custom_command_template' => $userPreferences->ffmpeg_custom_command_template ?? $settings['ffmpeg_custom_command_template'],
 
