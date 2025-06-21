@@ -191,13 +191,18 @@ class HlsStreamController extends Controller
                     
                     Log::channel('ffmpeg')->debug("HLS Stream: Original request for $type ID {$model->id} ({$logTitle}). Actual streaming $type ID {$actualStreamingModel->id} (" . ($actualStreamingModel->title_custom ?? $actualStreamingModel->title) . ").");
                 } else {
-                    // No stream (primary or failover) could be started
-                    Log::channel('ffmpeg')->error("HLS Stream: No stream could be started for $type ID {$model->id} ({$logTitle}) after trying all sources.");
-                    abort(503, 'Service unavailable. Failed to start the stream or any failovers.');
+                    // No stream (primary or failover) could be started, or lock not acquired.
+                    // The HlsStreamService already logs the specific reason (e.g., lock acquisition failure).
+                    Log::channel('ffmpeg')->error("HLS Stream: Service indicated no stream could be started for $type ID {$model->id} ({$logTitle}). This could be due to no available sources or a concurrent startup attempt.");
+                    // Return 503 with Retry-After header
+                    return response('Service unavailable. Please try again shortly.', 503)
+                           ->header('Retry-After', 5); // Suggest retrying after 5 seconds
                 }
             } catch (Exception $e) {
                 Log::channel('ffmpeg')->error("HLS Stream: Exception while trying to start stream for $type ID {$model->id} ({$logTitle}): {$e->getMessage()}");
-                abort(503, 'Service unavailable. Error during stream startup.');
+                // Return 503 with Retry-After header
+                return response('Service unavailable due to an internal error. Please try again shortly.', 503)
+                       ->header('Retry-After', 5); // Suggest retrying after 5 seconds
             }
         }
 
