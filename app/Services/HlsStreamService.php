@@ -642,7 +642,14 @@ class HlsStreamService
             if ($settings['ffmpeg_input_copyts'] ?? true) {
                 $cmd .= '-copyts ';
             }
+
+            // --- START TEMPORARY LOGGING ---
+            \Illuminate\Support\Facades\Log::channel('ffmpeg')->debug('[STREAM_LOOP_DEBUG] Attempting to add -stream_loop -1. Value of ffmpeg_input_stream_loop from settings: ' . var_export($settings['ffmpeg_input_stream_loop'] ?? 'not_set_in_settings_array', true));
+            // --- END TEMPORARY LOGGING ---
             if ($settings['ffmpeg_input_stream_loop'] ?? false) {
+                // --- START TEMPORARY LOGGING ---
+                \Illuminate\Support\Facades\Log::channel('ffmpeg')->debug('[STREAM_LOOP_DEBUG] Condition met. -stream_loop -1 flag IS BEING ADDED to command.');
+                // --- END TEMPORARY LOGGING ---
                 $cmd .= '-stream_loop -1 ';
             }
             if ($settings['ffmpeg_enable_print_graphs'] ?? false) {
