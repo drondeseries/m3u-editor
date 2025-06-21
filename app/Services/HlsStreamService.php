@@ -652,8 +652,9 @@ class HlsStreamService
             }
 
             // Input analysis optimization for faster stream start (using settings)
-            // Replace old fflags with new one from settings. The old '-flags low_delay -avoid_negative_ts disabled' is removed.
-            $cmd .= '-fflags ' . escapeshellarg($settings['ffmpeg_input_fflags'] ?? 'nobuffer+igndts+discardcorruptts+fillwallclockdts') . ' ';
+            // Use the new default 'nobuffer+igndts+low_delay' for ffmpeg_input_fflags from settings
+            $cmd .= '-fflags ' . escapeshellarg($settings['ffmpeg_input_fflags'] ?? 'nobuffer+igndts+low_delay') . ' ';
+            $cmd .= '-avoid_negative_ts disabled '; // Add this flag back
 
             // Replace old analyzeduration, probesize, max_delay with new ones from settings. Keep fpsprobesize.
             $cmd .= '-analyzeduration ' . escapeshellarg($settings['ffmpeg_input_analyzeduration'] ?? '3M') . ' ';

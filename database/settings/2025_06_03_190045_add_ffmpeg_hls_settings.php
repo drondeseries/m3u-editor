@@ -19,7 +19,7 @@ return new class extends SettingsMigration
             $blueprint->add('ffmpeg_input_analyzeduration', '3M');
             $blueprint->add('ffmpeg_input_probesize', '3M');
             $blueprint->add('ffmpeg_input_max_delay', '5000000');
-            $blueprint->add('ffmpeg_input_fflags', 'nobuffer+igndts+discardcorruptts+fillwallclockdts');
+            $blueprint->add('ffmpeg_input_fflags', 'nobuffer+igndts+low_delay');
             $blueprint->add('ffmpeg_output_include_aud', true);
             $blueprint->add('ffmpeg_enable_print_graphs', false);
             $blueprint->add('ffmpeg_input_stream_loop', false);
