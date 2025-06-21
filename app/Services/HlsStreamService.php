@@ -767,7 +767,7 @@ class HlsStreamService
             // Check if 'ffmpeg_enable_print_graphs' is also true, timing implies verbose.
             // If print_graphs is enabled, it often benefits from verbose logging.
             // The 'timing' data is useful for performance analysis.
-            $cmd .= ' -loglevel verbose+timing';
+            $cmd .= ' -loglevel verbose'; // Reverted from verbose+timing
         } else {
             $cmd .= ' -hide_banner -nostats -loglevel error';
         }
