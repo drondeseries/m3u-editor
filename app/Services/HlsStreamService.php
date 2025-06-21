@@ -8,6 +8,7 @@ use App\Models\Episode;
 use App\Exceptions\SourceNotResponding;
 use App\Traits\TracksActiveStreams;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Redis;
@@ -31,8 +32,21 @@ class HlsStreamService
         Channel|Episode $model, // This $model is the *original* requested channel/episode
         string $title           // This $title is the title of the *original* model
     ): ?object {
-        // Get stream settings, including the ffprobe timeout
-        $streamSettings = ProxyService::getStreamSettings();
+        $lockKey = "lock:hls_startup:{$type}:{$model->id}";
+        // Attempt to acquire lock for 30 seconds, lock TTL is 60 seconds.
+        $lock = Cache::lock($lockKey, 60);
+
+        try {
+            if (!$lock->get()) {
+                // Failed to acquire lock, another process is likely starting this stream.
+                Log::channel('ffmpeg')->warning("HLS Stream: Could not acquire startup lock for $type ID {$model->id} ({$title}). Another request may be processing it.");
+                // Consider throwing a custom exception here if the controller needs to handle it specifically.
+                // For now, returning null will lead to a 503 if no stream is found by the controller.
+                return null;
+            }
+
+            // Get stream settings, including the ffprobe timeout
+            $streamSettings = ProxyService::getStreamSettings();
         $ffprobeTimeout = $streamSettings['ffmpeg_ffprobe_timeout'] ?? 5; // Default to 5 if not set
 
         // Get the failover channels (if any)
@@ -146,6 +160,27 @@ class HlsStreamService
         // If loop finishes, no stream was successfully started
         Log::channel('ffmpeg')->error("No available (HLS) streams for {$type} {$title} (Original Model ID: {$model->id}) after trying all sources.");
         return null; // Return null if no stream started
+        } catch (LockTimeoutException $e) {
+            // This specific exception for lock timeout might not be strictly necessary
+            // if $lock->get() is the primary way we check, but good for robustness.
+            Log::channel('ffmpeg')->error("HLS Stream: Lock timeout while trying to acquire startup lock for $type ID {$model->id} ({$title}).");
+            return null;
+        } catch (Exception $e) {
+            // Catch any other general exceptions that might occur within the lock acquisition block
+            // This is a safety net, specific errors should be handled within the main loop if possible.
+            Log::channel('ffmpeg')->error("HLS Stream: Unexpected exception during stream startup for $type ID {$model->id} ({$title}): " . $e->getMessage());
+            // Ensure the lock is released if it was acquired and an unexpected error occurred.
+            // Though the main logic should handle releases in success/fail paths.
+            if (isset($lock) && $lock->owner() === Cache::getStore()->getLockProvider()->getCurrentOwner()) { // Check if we own the lock
+                 $lock->release();
+            }
+            throw $e; // Re-throw the exception after attempting to release the lock
+        } finally {
+            // Always ensure the lock is released if it was acquired by this instance.
+            if (isset($lock) && $lock->owner() === Cache::getStore()->getLockProvider()->getCurrentOwner()) {
+                $lock->release();
+            }
+        }
     }
 
     /**
