@@ -35,7 +35,7 @@ class GeneralSettings extends Settings
     public string $ffmpeg_input_analyzeduration;
     public string $ffmpeg_input_probesize;
     public string $ffmpeg_input_max_delay;
-    public string $ffmpeg_input_fflags;
+    public ?string $ffmpeg_input_fflags;
     public bool $ffmpeg_output_include_aud;
     public bool $ffmpeg_enable_print_graphs;
     public bool $ffmpeg_input_stream_loop;
