@@ -250,7 +250,7 @@ class PlaylistResource extends Resource
                             Notification::make()
                                 ->success()
                                 ->title('Playlist is fetching metadata for VOD channels')
-                                ->body('Playlist VOD channels are being processed in the background. Depending on the number of VOD entries, this may take a while. You will be notified on completion.')
+                                ->body('Playlist VOD channels are being processed in the background. Depending on the number of enabled VOD channels, this may take a while. You will be notified on completion.')
                                 ->duration(10000)
                                 ->send();
                         })
@@ -259,7 +259,7 @@ class PlaylistResource extends Resource
                         ->requiresConfirmation()
                         ->icon('heroicon-o-arrow-path')
                         ->modalIcon('heroicon-o-arrow-path')
-                        ->modalDescription('Fetch VOD metadata for this playlist now? Only enabled channels will be included.')
+                        ->modalDescription('Fetch VOD metadata for this playlist now? Only enabled VOD channels will be included.')
                         ->modalSubmitActionLabel('Yes, process now'),
                     Tables\Actions\Action::make('Download M3U')
                         ->label('Download M3U')
@@ -928,6 +928,13 @@ class PlaylistResource extends Resource
                             PlaylistInfo::make('play_list_info')
                                 ->label('') // disable the label
                                 ->columnSpanFull()
+                                ->registerActions([
+                                    Forms\Components\Actions\Action::make('refreshData')
+                                        ->icon('heroicon-m-arrow-path')
+                                        ->size('xs')
+                                        ->color('gray')
+                                        ->action(fn($record) => Cache::forget("xtream_stats:{$record->id}")),
+                                ])
                                 ->dehydrated(false), // don't save the value in the database
                         ]),
                     Forms\Components\Tabs::make()
@@ -985,7 +992,11 @@ class PlaylistResource extends Resource
                                                 $component->state($currentAuthIds);
                                             }
                                         })
-                                        ->helperText('Only unassigned auths are available. Each auth can only be assigned to one playlist at a time.')
+                                        ->hintIcon(
+                                            'heroicon-m-question-mark-circle',
+                                            tooltip: 'Only unassigned auths are available. Each auth can only be assigned to one playlist at a time. You will also be able to access the Xtream API using any assigned auths.'
+                                        )
+                                        ->helperText('Simple authentication for playlist access.')
                                         ->afterStateUpdated(function ($state, $record) {
                                             if (!$record) return;
 
