@@ -740,7 +740,8 @@ class SharedStreamService
         // Better error handling and more robust connection options
         $cmd .= '-err_detect ignore_err -ignore_unknown ';
         $cmd .= '-fflags +nobuffer+igndts -flags low_delay ';
-        $cmd .= '-analyzeduration 1M -probesize 1M -max_delay 500000 ';
+        // Increased analyzeduration and probesize to potentially help with SPS/PPS detection
+        $cmd .= '-analyzeduration 2M -probesize 2M -max_delay 500000 ';
 
         // HTTP options (simplified to match working approach)
         $cmd .= "-user_agent " . escapeshellarg($userAgent) . " -referer " . escapeshellarg("MyComputer") . " ";
@@ -2059,7 +2060,7 @@ class SharedStreamService
                 } else {
                     // Clean up disconnected clients for active streams
                     $inactiveClients = SharedStreamClient::where('stream_id', $streamKey)
-                        ->where('last_activity', '<', $inactiveThreshold)
+                        ->where('last_activity_at', '<', $inactiveThreshold)
                         ->get();
 
                     foreach ($inactiveClients as $client) {
