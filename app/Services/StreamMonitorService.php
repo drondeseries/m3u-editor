@@ -584,12 +584,8 @@ class StreamMonitorService
             ];
 
             if (!empty($stream)) {
-                // Ensure last_client_activity and started_at are converted to timestamps if they are Carbon objects
-                $lastClientActivityTimestamp = $stream->last_client_activity ? ($stream->last_client_activity instanceof \Illuminate\Support\Carbon ? $stream->last_client_activity->timestamp : (int)$stream->last_client_activity) : 0;
-                $startedAtTimestamp = $stream->started_at ? ($stream->started_at instanceof \Illuminate\Support\Carbon ? $stream->started_at->timestamp : (int)$stream->started_at) : 0;
-
-                $health['last_activity'] = $lastClientActivityTimestamp;
-                $health['uptime'] = time() - $startedAtTimestamp;
+                $health['last_activity'] = (int)($stream->last_client_activity ?? 0);
+                $health['uptime'] = time() - (int)($stream->started_at ?? 0);
 
                 // Check if process is running
                 $health['process_running'] = $stream->isProcessRunning();
