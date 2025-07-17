@@ -615,24 +615,13 @@ class ChannelResource extends Resource
                     ->modalSubmitActionLabel('Add failovers now'),
                 Tables\Actions\BulkAction::make('merge')
                     ->label('Merge Same ID')
-                    ->form(function (Collection $records) {
-                        // Get unique playlist IDs from the selected records
-                        $playlistIds = $records->pluck('playlist_id')->unique()->toArray();
-
-                        // Fetch the playlists from the database
-                        $playlists = Playlist::whereIn('id', $playlistIds)
-                            ->where('user_id', auth()->id())
-                            ->pluck('name', 'id');
-
-                        // Return the form schema
-                        return [
-                            Forms\Components\Select::make('playlist_id')
-                                ->label('Preferred Playlist')
-                                ->options($playlists)
-                                ->helperText('Select a playlist to prioritize as the master during the merge process. Only playlists that the selected channels belong to are shown.')
-                                ->required(),
-                        ];
-                    })
+                    ->form([
+                        Forms\Components\Select::make('playlist_id')
+                            ->label('Preferred Playlist')
+                            ->options(Playlist::where('user_id', auth()->id())->pluck('name', 'id'))
+                            ->helperText('Select a playlist to prioritize as the master during the merge process.')
+                            ->required(),
+                    ])
                     ->action(function (Collection $records, array $data): void {
                         app('Illuminate\Contracts\Bus\Dispatcher')
                             ->dispatch(new \App\Jobs\MergeChannels($records, auth()->user(), $data['playlist_id'] ?? null));
