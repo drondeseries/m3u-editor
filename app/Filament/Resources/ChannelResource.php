@@ -611,7 +611,7 @@ class ChannelResource extends Resource
                         ->label('Unmerge Same ID')
                         ->action(function (Collection $records): void {
                             app('Illuminate\Contracts\Bus\Dispatcher')
-                                ->dispatch(new \App\Jobs\UnmergeChannels($records, auth()->user()));
+                                ->dispatch(new \App\Jobs\UnmergeChannels(auth()->id()));
                         })->after(function () {
                             Notification::make()
                                 ->success()
