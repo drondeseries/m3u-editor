@@ -46,26 +46,12 @@ class MergeChannels implements ShouldQueue
 
         foreach ($groupedChannels as $group) {
             if ($group->count() > 1) {
-                $master = null;
-                if ($this->playlistId) {
-                    $preferredChannels = $group->where('playlist_id', $this->playlistId);
-                    if ($preferredChannels->isNotEmpty()) {
-                        $master = $preferredChannels->reduce(function ($highest, $channel) {
-                            if (!$highest) return $channel;
-                            $highestResolution = $this->getResolution($highest);
-                            $currentResolution = $this->getResolution($channel);
-                            return ($currentResolution > $highestResolution) ? $channel : $highest;
-                        });
-                    }
-                }
+                // The master channel is the one from the preferred playlist.
+                $master = $group->firstWhere('playlist_id', $this->playlistId);
 
+                // If no channel from the preferred playlist is in the group, we can't determine a master.
                 if (!$master) {
-                    $master = $group->reduce(function ($highest, $channel) {
-                        if (!$highest) return $channel;
-                        $highestResolution = $this->getResolution($highest);
-                        $currentResolution = $this->getResolution($channel);
-                        return ($currentResolution > $highestResolution) ? $channel : $highest;
-                    });
+                    continue;
                 }
 
                 // The rest are failovers
@@ -81,17 +67,6 @@ class MergeChannels implements ShouldQueue
             }
         }
         $this->sendCompletionNotification($processed);
-    }
-
-    private function getResolution($channel)
-    {
-        $streamStats = $channel->stream_stats;
-        foreach ($streamStats as $stream) {
-            if (isset($stream['stream']['codec_type']) && $stream['stream']['codec_type'] === 'video') {
-                return ($stream['stream']['width'] ?? 0) * ($stream['stream']['height'] ?? 0);
-            }
-        }
-        return 0;
     }
 
     protected function sendCompletionNotification($processed)
