@@ -57,17 +57,16 @@ class MergeChannels implements ShouldQueue
             // Check if any of the failovers have the same stream ID
             $matchingFailovers = $failoverChannels->clone() // make a copy of the query
                 ->where(function ($query) use ($channel) {
-                    if ($channel->stream_id_custom) {
-                        $query->where('stream_id_custom', $channel->stream_id_custom);
-                    }
-                    if ($channel->stream_id) {
+                    $query->where(function ($query) use ($channel) {
                         if ($channel->stream_id_custom) {
-                            $query->orWhere('stream_id', $channel->stream_id);
-                        } else {
-                            $query->where('stream_id', $channel->stream_id);
+                            $query->where('stream_id_custom', $channel->stream_id_custom);
                         }
-                    }
-                })->get();
+                        if ($channel->stream_id) {
+                            $query->orWhere('stream_id', $channel->stream_id);
+                        }
+                    });
+                })
+                ->get();
 
             if ($matchingFailovers->isEmpty()) {
                 continue; // No matching failovers, skip to the next channel
