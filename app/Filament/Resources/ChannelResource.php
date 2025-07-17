@@ -624,7 +624,7 @@ class ChannelResource extends Resource
                     ])
                     ->action(function (Collection $records, array $data): void {
                         app('Illuminate\Contracts\Bus\Dispatcher')
-                            ->dispatch(new \App\Jobs\MergeChannels($records, auth()->user(), $data['playlist_id'] ?? null));
+                            ->dispatch(new \App\Jobs\MergeChannels($records->pluck('id'), auth()->user(), $data['playlist_id'] ?? null));
                     })->after(function () {
                         Notification::make()
                             ->success()

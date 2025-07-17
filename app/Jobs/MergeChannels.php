@@ -22,7 +22,7 @@ class MergeChannels implements ShouldQueue
     /**
      * Create a new job instance.
      */
-    public function __construct(public Collection $channels, $user, $playlistId = null)
+    public function __construct(public Collection $channelIds, $user, $playlistId = null)
     {
         $this->user = $user;
         $this->playlistId = $playlistId;
@@ -34,8 +34,9 @@ class MergeChannels implements ShouldQueue
     public function handle(): void
     {
         $processed = 0;
+        $channels = Channel::whereIn('id', $this->channelIds)->get();
         // Filter out channels where the stream ID is empty
-        $filteredChannels = $this->channels->filter(function ($channel) {
+        $filteredChannels = $channels->filter(function ($channel) {
             return !empty($channel->stream_id_custom) || !empty($channel->stream_id);
         });
 
