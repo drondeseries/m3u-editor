@@ -28,7 +28,7 @@ class MergeChannelsTest extends TestCase
         $channels = new Collection([$channel1, $channel2, $channel3, $channel4]);
 
         // Dispatch the job
-        (new MergeChannels($channels, $user))->handle();
+        (new MergeChannels($channels->pluck('id'), $user))->handle();
 
         // Assert that only the channels with the same stream_id were merged
         $this->assertDatabaseCount('channel_failovers', 1);
@@ -52,7 +52,7 @@ class MergeChannelsTest extends TestCase
         $channels = new Collection([$channel1, $channel2, $channel3]);
 
         // Dispatch the job with playlist1 as preferred
-        (new MergeChannels($channels, $user, $playlist1->id))->handle();
+        (new MergeChannels($channels->pluck('id'), $user, $playlist1->id))->handle();
 
         // Assert that channel1 is the master
         $this->assertDatabaseHas('channel_failovers', [
