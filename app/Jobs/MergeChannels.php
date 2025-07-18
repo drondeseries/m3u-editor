@@ -40,22 +40,22 @@ class MergeChannels implements ShouldQueue
                 $query->whereNotNull('stream_id_custom')->orWhereNotNull('stream_id');
             })->cursor();
 
-        // Get the failover channels from the specified playlists
-        $failoverChannels = Channel::whereIn('playlist_id', $this->playlists)
-            ->where('playlist_id', '!=', $this->playlistId) // Exclude primary playlist channels
-            ->where(function ($query) {
-                $query->whereNotNull('stream_id_custom')->orWhereNotNull('stream_id');
-            });
-
         // Loop through primary channels and assign any matching failover channels
         foreach ($primaryChannels as $channel) {
+            // Get the failover channels from the specified playlists
+            $failoverChannels = Channel::whereIn('playlist_id', $this->playlists)
+                ->where('playlist_id', '!=', $this->playlistId) // Exclude primary playlist channels
+                ->where(function ($query) {
+                    $query->whereNotNull('stream_id_custom')->orWhereNotNull('stream_id');
+                });
+
             // Skip if channel has no stream ID to match against
             if (!$channel->stream_id_custom && !$channel->stream_id) {
                 continue;
             }
 
             // Check if any of the failovers have the same stream ID
-            $matchingFailovers = $failoverChannels->clone() // make a copy of the query
+            $matchingFailovers = $failoverChannels
                 ->where(function ($query) use ($channel) {
                     if ($channel->stream_id_custom) {
                         $query->where('stream_id_custom', $channel->stream_id_custom);
