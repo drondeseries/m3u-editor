@@ -351,6 +351,12 @@ class ProxyService
             if (!empty($subtitleCodec)) {
                 $outputFormat .= "-c:s {$subtitleCodec} ";
             }
+
+            // Add the h264_metadata bitstream filter when using QSV to fix potential bitstream errors
+            if ($qsvEnabled || $isQsvCodec) {
+                $outputFormat .= " -bsf:v h264_metadata=profile=100 ";
+            }
+
             $outputFormat = trim($outputFormat); // Trim trailing space
 
             // Reconstruct FFmpeg Command (ensure $ffmpegPath is escaped if it can contain spaces, though unlikely for a binary name)
