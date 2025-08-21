@@ -134,6 +134,8 @@ class ProxyService
             'ffmpeg_codec_subtitles' => 'copy',
             'ffmpeg_path' => 'jellyfin-ffmpeg',
             'ffprobe_path' => 'jellyfin-ffprobe', // Default ffprobe path
+            'ffmpeg_analyzeduration' => '1M',
+            'ffmpeg_probesize' => '1M',
 
             // HW acceleration settings
             'hardware_acceleration_method' => 'none',
@@ -360,7 +362,7 @@ class ProxyService
             $cmd .= '-fflags nobuffer+igndts -flags low_delay -avoid_negative_ts disabled -copyts -start_at_zero ';
 
             // Input analysis optimization for faster stream start
-            $cmd .= '-analyzeduration 1M -probesize 1M -max_delay 500000 -fpsprobesize 0 ';
+            $cmd .= "-analyzeduration {$settings['ffmpeg_analyzeduration']} -probesize {$settings['ffmpeg_probesize']} -max_delay 500000 -fpsprobesize 0 ";
 
             // Better error handling
             $cmd .= '-err_detect ignore_err -ignore_unknown ';
@@ -643,7 +645,7 @@ class ProxyService
 
             // Input stream analysis and buffer handling
             $cmd .= '-fflags nobuffer+igndts -flags low_delay -avoid_negative_ts make_zero ';
-            $cmd .= '-analyzeduration 1M -probesize 1M -max_delay 200000 ';
+            $cmd .= "-analyzeduration {$settings['ffmpeg_analyzeduration']} -probesize {$settings['ffmpeg_probesize']} -max_delay 200000 ";
             
             // Better error handling and stream format detection
             $cmd .= '-err_detect ignore_err -ignore_unknown -fflags +discardcorrupt ';

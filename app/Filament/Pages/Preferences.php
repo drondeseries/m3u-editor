@@ -145,6 +145,16 @@ class Preferences extends SettingsPage
                                             ->minValue(1)
                                             ->default(4)
                                             ->helperText('Target HLS segment duration in seconds. Default: 4.'),
+                                        Forms\Components\TextInput::make('ffmpeg_analyzeduration')
+                                            ->label('Analyzed Duration')
+                                            ->columnSpan(1)
+                                            ->default('1M')
+                                            ->helperText('How long FFmpeg should analyze the stream to gather information. Default: 1M.'),
+                                        Forms\Components\TextInput::make('ffmpeg_probesize')
+                                            ->label('Probe Size')
+                                            ->columnSpan(1)
+                                            ->default('1M')
+                                            ->helperText('How much data FFmpeg should look at to determine the stream\'s format. Default: 1M.'),
                                         Forms\Components\TextInput::make('hls_playlist_max_attempts')
                                             ->label('HLS Playlist Max Wait Attempts')
                                             ->columnSpan(1)
@@ -672,7 +682,9 @@ class Preferences extends SettingsPage
             // 'mediaflow_proxy_url', 'mediaflow_proxy_port', 'mediaflow_proxy_password',
             // 'mediaflow_proxy_user_agent', 
             'ffmpeg_path',
-            'ffprobe_path'
+            'ffprobe_path',
+            'ffmpeg_analyzeduration',
+            'ffmpeg_probesize',
         ];
 
         foreach ($nullableTextfields as $field) {

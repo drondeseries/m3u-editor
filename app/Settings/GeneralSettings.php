@@ -29,6 +29,8 @@ class GeneralSettings extends Settings
     public ?string $ffmpeg_path = null;
     public ?string $ffprobe_path = null;
     public ?int $ffmpeg_hls_time = 4;
+    public ?string $ffmpeg_analyzeduration = '1M';
+    public ?string $ffmpeg_probesize = '1M';
     public ?int $ffmpeg_ffprobe_timeout = 5;
     public ?int $hls_playlist_max_attempts = 10;
     public ?float $hls_playlist_sleep_seconds = 1.0;
