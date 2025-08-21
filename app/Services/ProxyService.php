@@ -362,7 +362,9 @@ class ProxyService
             $cmd .= '-fflags nobuffer+igndts -flags low_delay -avoid_negative_ts disabled -copyts -start_at_zero ';
 
             // Input analysis optimization for faster stream start
-            $cmd .= "-analyzeduration {$settings['ffmpeg_analyzeduration']} -probesize {$settings['ffmpeg_probesize']} -max_delay 500000 -fpsprobesize 0 ";
+            $analyzeduration = $settings['ffmpeg_analyzeduration'] ?: '1M';
+            $probesize = $settings['ffmpeg_probesize'] ?: '1M';
+            $cmd .= "-analyzeduration {$analyzeduration} -probesize {$probesize} -max_delay 500000 -fpsprobesize 0 ";
 
             // Better error handling
             $cmd .= '-err_detect ignore_err -ignore_unknown ';
@@ -645,7 +647,15 @@ class ProxyService
 
             // Input stream analysis and buffer handling
             $cmd .= '-fflags nobuffer+igndts -flags low_delay -avoid_negative_ts make_zero ';
-            $cmd .= "-analyzeduration {$settings['ffmpeg_analyzeduration']} -probesize {$settings['ffmpeg_probesize']} -max_delay 200000 ";
+            $analyzeduration = $settings['ffmpeg_analyzeduration'] ?: '1M';
+            $probesize = $settings['ffmpeg_probesize'] ?: '1M';
+
+            if ($isMkv) {
+                $analyzeduration = '10M';
+                $probesize = '10M';
+            }
+
+            $cmd .= "-analyzeduration {$analyzeduration} -probesize {$probesize} -max_delay 200000 ";
             
             // Better error handling and stream format detection
             $cmd .= '-err_detect ignore_err -ignore_unknown -fflags +discardcorrupt ';
@@ -660,10 +670,6 @@ class ProxyService
             // Add rw_timeout for all http/https inputs to make ffmpeg fail faster on stall
             if (preg_match('/^https?:\/\//', $streamUrl)) {
                 $cmd .= '-rw_timeout 10000000 '; // 10 seconds in microseconds
-            }
-
-            if ($isMkv) {
-                $cmd .= ' -analyzeduration 10M -probesize 10M ';
             }
             
             // Add stream copy options to preserve timing
