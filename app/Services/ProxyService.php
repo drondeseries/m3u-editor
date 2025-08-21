@@ -352,9 +352,9 @@ class ProxyService
                 $outputFormat .= "-c:s {$subtitleCodec} ";
             }
 
-            // Add the h264_metadata bitstream filter when using QSV to fix potential bitstream errors
+            // Add the h264_mp4toannexb bitstream filter when using QSV to fix potential bitstream errors
             if ($qsvEnabled || $isQsvCodec) {
-                $outputFormat .= " -bsf:v h264_metadata=profile=100 ";
+                $outputFormat .= " -bsf:v h264_mp4toannexb ";
             }
 
             $outputFormat = trim($outputFormat); // Trim trailing space
