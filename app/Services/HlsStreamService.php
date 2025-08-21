@@ -182,7 +182,7 @@ class HlsStreamService
                 $this->decrementActiveStreams($playlist->id); // Ensure decrement if not already handled
                 Redis::srem("hls:active_{$type}_ids", $stream->id); // Remove current stream from active set
                 Log::channel('ffmpeg')->error("General error streaming channel {$currentStreamTitle} (Original: {$title}, Stream ID: {$stream->id}): " . $e->getMessage());
-                Redis::setex($badSourceCacheKey, ProxyService::BAD_SOURCE_CACHE_SECONDS_GENERAL_ERROR ?? ProxyService::BAD_SOURCE_CACHE_SECONDS, "General error: " . $e->getMessage());
+                Redis::setex($badSourceCacheKey, ProxyService::BAD_SOURCE_CACHE_SECONDS, "General error: " . $e->getMessage());
                 $allAttemptsFailedDueToPlaylistLimits = false; // Mark failure as not due to playlist limits
                 // Try the next failover channel
                 continue;
